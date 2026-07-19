@@ -5,6 +5,7 @@ networkx>=3.0
 streamlit>=1.35
 plotly>=5.18
 fastapi
-uvicorn
+uvicorn[standard]
 jinja2
 python-multipart
+requests>=2.31

@@ -261,6 +261,18 @@ async def api_entities():
         soar = soar_lookup.get(eid, {})
         cr = d["bft_records"].get(eid)
         
+        # Serialize AgentVote dataclass objects to dicts (fixes JSON TypeError)
+        votes_serialized = []
+        if cr and cr.votes:
+            for v in cr.votes:
+                votes_serialized.append({
+                    "agent_id": v.agent_id,
+                    "flagged": bool(v.flagged),
+                    "score": float(v.risk_score),
+                    "threshold": float(v.threshold_used),
+                    "variant": v.score_variant,
+                })
+
         rows.append({
             "id": eid,
             "risk_score": score,
@@ -268,46 +280,91 @@ async def api_entities():
             "decision": soar.get("decision", "—"),
             "consensus": cr.consensus if cr else "—",
             "tier0": eid in TIER0_WHITELIST,
-            "votes": cr.votes if cr else []
+            "votes": votes_serialized,
         })
         
     return JSONResponse({"entities": rows})
+
 
 @app.get("/api/graph")
 async def api_graph():
     if not PIPELINE_DATA:
         return JSONResponse({"error": "System initializing"}, status_code=503)
-    # The attack_graph is a NetworkX graph. We need to serialize it to JSON.
+    # BUG FIX: Must pass ag.G (the NetworkX DiGraph), not the AttackGraph wrapper object
     from networkx.readwrite import json_graph
-    data = json_graph.node_link_data(PIPELINE_DATA["attack_graph"])
+    data = json_graph.node_link_data(PIPELINE_DATA["attack_graph"].G)
+    # Normalize: NetworkX ≥3.4 uses "edges" key, react-force-graph-2d expects "links"
+    if "edges" in data and "links" not in data:
+        data["links"] = data.pop("edges")
     return JSONResponse(data)
 
 @app.get("/api/audit")
 async def api_audit():
     if not PIPELINE_DATA:
         return JSONResponse({"error": "System initializing"}, status_code=503)
-    
     soar_records = PIPELINE_DATA["soar_records"]
     return JSONResponse({"audit_logs": soar_records})
 
+@app.get("/api/bft_log")
+async def api_bft_log():
+    """Return BFT vote log: list of ConsensusResult dicts for each flagged entity."""
+    if not PIPELINE_DATA:
+        return JSONResponse({"error": "System initializing"}, status_code=503)
+    bft_records = PIPELINE_DATA["bft_records"]
+    entries = []
+    for eid, cr in bft_records.items():
+        entries.append(cr.to_dict())
+    return JSONResponse({"bft_log": entries})
+
+@app.get("/api/fpr_recall")
+async def api_fpr_recall():
+    """Return FPR-Recall tradeoff curve at 5 operating points."""
+    if not PIPELINE_DATA:
+        return JSONResponse({"error": "System initializing"}, status_code=503)
+    from evaluate import fpr_recall_tradeoff
+    d = PIPELINE_DATA
+    curve = fpr_recall_tradeoff(
+        d["cal_model"],
+        d["X_te_cal"].values,
+        d["y_test"],
+        threshold_multipliers=[0.70, 0.85, 1.00, 1.10, 1.25],
+    )
+    return JSONResponse({
+        "tradeoff_curve": curve,
+        "ablation": d["ablation"],
+        "base_metrics": d["base_metrics"]["overall"],
+        "cal_metrics": d["cal_metrics"]["overall"],
+    })
+
 from pydantic import BaseModel
+
+class RagQueryRequest(BaseModel):
+    query: str
+    top_k: int = 3
+    doc_type: str = None  # 'mitre_technique' | 'cve' | 'cert_advisory' | None
 
 class OverrideRequest(BaseModel):
     entity_id: str
     action: str
 
+@app.post("/api/rag")
+async def api_rag(req: RagQueryRequest):
+    """Query the RAG engine with free text. Returns top-k relevant threat intel docs."""
+    if not PIPELINE_DATA:
+        return JSONResponse({"error": "System initializing"}, status_code=503)
+    rag = PIPELINE_DATA["rag"]
+    results = rag.query(req.query, top_k=req.top_k, doc_type=req.doc_type or None)
+    stats = rag.corpus_stats()
+    return JSONResponse({"results": results, "corpus_stats": stats})
+
 @app.post("/api/override")
 async def api_override(req: OverrideRequest):
     if not PIPELINE_DATA:
         return JSONResponse({"error": "System initializing"}, status_code=503)
-        
     soar_records = PIPELINE_DATA["soar_records"]
     for record in soar_records:
         if record["entity_id"] == req.entity_id:
             record["decision"] = req.action
             record["override_applied"] = True
             return JSONResponse({"status": "success", "record": record})
-            
     return JSONResponse({"error": "Entity not found"}, status_code=404)
-
-
