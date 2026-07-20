@@ -60,6 +60,17 @@ export default function App() {
     } catch (e) { console.error(e) }
   }
 
+  const fetchRagStatsInit = async () => {
+    try {
+      const res = await fetch('/api/rag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: 'init', top_k: 1 })
+      })
+      if (res.ok) { const d = await res.json(); setRagStats(d.corpus_stats || null); }
+    } catch (e) { console.error(e) }
+  }
+
   const handleRagQuery = async () => {
     if (!ragQuery.trim()) return
     setRagLoading(true)
@@ -92,7 +103,10 @@ export default function App() {
       setStatus(d.status)
       if (d.status === 'ready') {
         fetchMetrics(); fetchEntities(); fetchGraph()
-        fetchAudit(); fetchBftLog(); fetchFprRecall()
+        fetchAudit()
+        fetchBftLog()
+        fetchFprRecall()
+        fetchRagStatsInit()
       }
     } catch (e) { console.error(e) }
   }
@@ -151,10 +165,13 @@ export default function App() {
     const toX = (fpr: number) => PAD + fpr * (W - 2 * PAD)
     const toY = (rec: number) => (H - PAD) - rec * (H - 2 * PAD)
 
+    // Anchor points for full ROC curve rendering
+    const fullCurve = [{fpr: 0, recall: 0, threshold_multiplier: 'inf'}, ...curve, {fpr: 1, recall: 1, threshold_multiplier: '0'}]
+
     // Cal-conditioned curve (white solid)
     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.5
     ctx.beginPath()
-    curve.forEach((pt: any, i: number) => {
+    fullCurve.forEach((pt: any, i: number) => {
       i === 0 ? ctx.moveTo(toX(pt.fpr), toY(pt.recall)) : ctx.lineTo(toX(pt.fpr), toY(pt.recall))
     })
     ctx.stroke()
@@ -531,7 +548,7 @@ export default function App() {
                       {graphData.nodes?.length || 0} nodes · {(graphData.links || graphData.edges || []).length} edges
                     </span>
                   </div>
-                  <div className="card-body" style={{ padding: 0, height: 'calc(100vh - 240px)' }}>
+                  <div className="card-body" style={{ padding: 0, height: 'calc(100vh - 240px)', display: 'flex', justifyContent: 'center', backgroundColor: '#09090b', overflow: 'hidden' }}>
                     <ForceGraph2D
                       graphData={graphData}
                       nodeLabel="id"
@@ -542,8 +559,7 @@ export default function App() {
                       linkDirectionalArrowLength={3.5}
                       linkDirectionalArrowRelPos={1}
                       backgroundColor="#09090b"
-                      width={800}
-                      height={600}
+                      width={1050}
                     />
                   </div>
                 </div>
@@ -621,7 +637,7 @@ export default function App() {
                   <span>TF-IDF Retrieval over MITRE ATT&CK / CVE / CERT-In Corpus</span>
                   {ragStats && (
                     <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                      Total Documents: {ragStats.total_documents} (Techniques: {ragStats.mitre_count})
+                      Total Documents: {ragStats.total_documents} (Techniques: {ragStats.by_type?.mitre_technique || 0})
                     </span>
                   )}
                 </div>
