@@ -82,7 +82,7 @@ def run(use_synthetic: bool, use_agentic: bool = False, use_bft: bool = False,
     X_train_cal = add_calendar_features(X_train_normal_burst, train_phase)
     X_test_cal = add_calendar_features(X_test, test_phase)
 
-    cal_model = HybridAnomalyDetector()
+    cal_model = HybridAnomalyDetector(n_conditional_cols=4)
     cal_model.fit(X_train_cal.values)
     print(f"Calibrated threshold (5% target FPR on training-normal distribution): {cal_model.threshold_:.4f}")
     y_pred_cal = cal_model.predict(X_test_cal.values)

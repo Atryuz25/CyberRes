@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
+import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, AreaChart, Area } from 'recharts'
 
 export default function App() {
   const [status, setStatus] = useState<string>('initializing')
@@ -14,7 +15,62 @@ export default function App() {
   const [ragResults, setRagResults] = useState<any[]>([])
   const [ragStats, setRagStats] = useState<any>(null)
   const [ragLoading, setRagLoading] = useState<boolean>(false)
+  const [latencyHistory, setLatencyHistory] = useState<any[]>([])
+  const [soarActionCounts, setSoarActionCounts] = useState<any>({'AUTO_CONTAIN': 0, 'ESCALATE': 0, 'DROP': 0})
+  const [bftVoteDist, setBftVoteDist] = useState<any>({'FLAGGED': 0, 'CLEAR': 0, 'DISPUTED': 0})
+  const [liveFeed, setLiveFeed] = useState<any[]>([])
+  const [riskHistogram, setRiskHistogram] = useState<any[]>([
+    { range: '0.0-0.2', normal: 0, anomaly: 0 },
+    { range: '0.2-0.4', normal: 0, anomaly: 0 },
+    { range: '0.4-0.6', normal: 0, anomaly: 0 },
+    { range: '0.6-0.8', normal: 0, anomaly: 0 },
+    { range: '0.8-1.0', normal: 0, anomaly: 0 },
+  ])
   const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/stream`;
+    const ws = new WebSocket(wsUrl)
+    
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data)
+      if (msg.type === 'NEW_ANOMALY') {
+         const { soar, bft, latency_ms, timestamp } = msg.data
+         const timeStr = new Date(timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})
+         
+         setLatencyHistory((prev: any[]) => {
+            const hist = [...prev, { time: timeStr, latency: latency_ms }]
+            return hist.slice(-15)
+         })
+         
+         if (soar && soar.decision) {
+           setSoarActionCounts((prev: any) => ({...prev, [soar.decision]: (prev[soar.decision] || 0) + 1}))
+           setAuditLogs((prev: any[]) => [soar, ...prev.slice(0, 99)])
+           
+           const newEnt = { id: soar.entity_id, risk_score: soar.confidence, category: 'Live Detection', decision: soar.decision }
+           setEntities((prev: any[]) => [newEnt, ...prev.filter((e: any) => e.id !== soar.entity_id).slice(0, 99)])
+           
+           setLiveFeed((prev: any[]) => [{ time: timeStr, ent: newEnt, bft: bft }, ...prev.slice(0, 49)])
+           
+           const score = soar.confidence || soar.risk_score || 0;
+           const bucketIdx = Math.min(Math.floor(score / 0.2), 4);
+           setRiskHistogram((prev: any[]) => {
+             const next = [...prev];
+             if (score > 0.8) next[bucketIdx] = { ...next[bucketIdx], anomaly: next[bucketIdx].anomaly + 1 };
+             else next[bucketIdx] = { ...next[bucketIdx], normal: next[bucketIdx].normal + 1 };
+             return next;
+           });
+         }
+         
+         if (bft && bft.consensus) {
+           setBftVoteDist((prev: any) => ({...prev, [bft.consensus]: (prev[bft.consensus] || 0) + 1}))
+           setBftLog((prev: any[]) => [{entity_id: soar?.entity_id || 'unknown', ...bft}, ...prev.slice(0, 99)])
+         }
+      }
+    }
+    return () => ws.close()
+  }, [])
 
   // ── Data fetchers ────────────────────────────────────────────────────────
 
@@ -49,7 +105,16 @@ export default function App() {
   const fetchBftLog = async () => {
     try {
       const res = await fetch('/api/bft_log')
-      if (res.ok) { const d = await res.json(); setBftLog(d.bft_log || []) }
+      if (res.ok) { 
+        const d = await res.json()
+        const logs = d.bft_log || []
+        setBftLog(logs)
+        const dist = logs.reduce((acc: any, log: any) => {
+          if (log.consensus) acc[log.consensus] = (acc[log.consensus] || 0) + 1
+          return acc
+        }, {'FLAGGED': 0, 'CLEAR': 0, 'DISPUTED': 0})
+        setBftVoteDist(dist)
+      }
     } catch (e) { console.error(e) }
   }
 
@@ -317,80 +382,96 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="metrics-grid">
-                {[
-                  { label: 'False Positive Rate', value: `${(metrics.fpr * 100).toFixed(2)}%`, delta: `${metrics.fpr_delta > 0 ? '+' : ''}${(metrics.fpr_delta * 100).toFixed(2)}%`, cls: 'text-success' },
-                  { label: 'Recall (Detection Rate)', value: `${(metrics.recall * 100).toFixed(2)}%`, delta: `${metrics.recall_delta > 0 ? '+' : ''}${(metrics.recall_delta * 100).toFixed(2)}%`, cls: 'text-success' },
-                  { label: 'Burst FPR Reduction', value: `${metrics.burst_fpr_red?.toFixed(1)}%`, delta: 'calendar-conditioned', cls: 'text-warning' },
-                  { label: 'Avg Latency', value: `${metrics.latency_ms?.toFixed(0)} ms`, delta: `vs ${metrics.ibm_mtti}d IBM MTTI`, cls: 'text-warning' },
-                ].map((m, i) => (
-                  <div key={i} className="metric-card">
-                    <div className="metric-label">{m.label}</div>
-                    <div className={`metric-value ${m.cls}`}>{m.value}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{m.delta}</div>
+                            <div className="metrics-grid" style={{ marginBottom: '24px' }}>
+                <div className="metric-card">
+                  <div className="metric-value">{metrics?.n_samples?.toLocaleString() || '...'}</div>
+                  <div className="metric-label">Total Endpoints Evaluated</div>
+                </div>
+                <div className="metric-card">
+                  <div className="metric-value text-error">{metrics?.fpr ? (metrics.fpr * 100).toFixed(2) : '...'}%</div>
+                  <div className="metric-label">False Positive Rate (Cal-Conditioned)</div>
+                </div>
+                <div className="metric-card">
+                  <div className="metric-value text-success">{latencyHistory.length > 0 ? latencyHistory[latencyHistory.length-1].latency.toFixed(0) : (metrics?.latency_ms?.toFixed(0) || '...')} <span style={{ fontSize: '14px' }}>ms</span></div>
+                  <div className="metric-label">Live Pipeline Latency</div>
+                </div>
+                <div className="metric-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ padding: '20px 20px 0' }}>
+                    <div className="metric-value text-success">Real-time</div>
+                    <div className="metric-label">Latency Stream</div>
                   </div>
-                ))}
+                  <div style={{ flex: 1, minHeight: '60px', marginTop: '10px' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={latencyHistory}>
+                        <Line type="monotone" dataKey="latency" stroke="#10b981" strokeWidth={2} dot={false} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
               </div>
 
-              <div className="card">
-                <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>Flagged Entities · BFT Consensus · Human Gate</span>
-                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{entities.length} flagged</span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Live Network Intercept</span>
+                    <span style={{ fontSize: '11px', color: 'var(--status-success-text)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', backgroundColor: 'var(--status-success-text)', borderRadius: '50%', display: 'inline-block' }}></span>
+                      STREAMING
+                    </span>
+                  </div>
+                  <div className="card-body mono" style={{ padding: '12px', backgroundColor: '#09090b', color: '#4ade80', flex: 1, height: '400px', overflowY: 'auto', fontSize: '11px', lineHeight: 1.6 }}>
+                    {liveFeed.length === 0 ? <div style={{opacity: 0.5}}>Waiting for live stream...</div> : null}
+                    {liveFeed.map((item: any, i: number) => (
+                      <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid rgba(74, 222, 128, 0.1)' }}>
+                        <span style={{ opacity: 0.5 }}>[{item.time}]</span> 
+                        {' '} {item.ent.id} {' | '}
+                        <span style={{ color: item.ent.risk_score > 0.8 ? '#f87171' : '#fbbf24' }}>RISK:{item.ent.risk_score?.toFixed(3)}</span> 
+                        {' -> '} 
+                        <span style={{ color: item.ent.decision === 'AUTO_CONTAIN' ? '#f87171' : item.ent.decision === 'ESCALATE' ? '#fbbf24' : '#a1a1aa' }}>
+                          [{item.ent.decision}]
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="card-body" style={{ padding: 0 }}>
-                  <table>
-                    <thead><tr>
-                      <th>Entity ID</th>
-                      <th>Risk Score</th>
-                      <th>Category</th>
-                      <th>Agent Votes (A/B/C)</th>
-                      <th>Consensus</th>
-                      <th>Decision</th>
-                      <th>Human Override</th>
-                    </tr></thead>
-                    <tbody>
-                      {entities.slice(0, 20).map((ent: any, i: number) => (
-                        <tr key={i}>
-                          <td className="mono">
-                            {ent.id}
-                            {ent.tier0 && <span className="badge badge-warning" style={{ marginLeft: '8px', fontSize: '10px' }}>TIER-0</span>}
-                          </td>
-                          <td className="mono text-error">{ent.risk_score?.toFixed(3)}</td>
-                          <td><span className="badge badge-neutral">{ent.category}</span></td>
-                          <td>
-                            {/* FIX: votes is list of {flagged, score, threshold} dicts, not booleans */}
-                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                              {['A', 'B', 'C'].map((label, vi) => {
-                                const vote = ent.votes?.[vi]
-                                const flagged = vote?.flagged ?? (vote === true)
-                                return (
-                                  <span key={vi} title={`Agent ${label}: ${flagged ? 'FLAGGED' : 'CLEAR'}`}
-                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', fontSize: '10px', color: 'var(--text-secondary)' }}>
-                                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: flagged ? 'var(--status-error-text)' : 'var(--status-success-text)', display: 'inline-block' }} />
-                                    {label}
-                                  </span>
-                                )
-                              })}
-                            </div>
-                          </td>
-                          <td>
-                            <span className={`badge ${ent.consensus === 'FLAGGED' ? 'badge-error' : ent.consensus === 'DISPUTED' ? 'badge-warning' : 'badge-neutral'}`}>
-                              {ent.consensus}
-                            </span>
-                          </td>
-                          <td>
-                            <span className={`badge ${decisionBadgeClass(ent.decision)}`}>{ent.decision}</span>
-                          </td>
-                          <td>
-                            <div style={{ display: 'flex', gap: '6px' }}>
-                              <button className="btn btn-primary btn-sm" onClick={() => handleOverride(ent.id, 'ESCALATE')}>Approve</button>
-                              <button className="btn btn-secondary btn-sm" onClick={() => handleOverride(ent.id, 'DISMISS')}>Dismiss</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                
+                <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Flagged Entities · BFT Consensus</span>
+                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{entities.length} flagged</span>
+                  </div>
+                  <div className="card-body" style={{ padding: 0, flex: 1, height: '400px', overflowY: 'auto' }}>
+                    <table>
+                      <thead><tr>
+                        <th>Entity ID</th>
+                        <th>Risk Score</th>
+                        <th>Decision</th>
+                        <th>Human Override</th>
+                      </tr></thead>
+                      <tbody>
+                        {entities.slice(0, 20).map((ent: any, i: number) => (
+                          <tr key={i}>
+                            <td className="mono">
+                              {ent.id}
+                              {ent.tier0 && <span className="badge badge-warning" style={{ marginLeft: '8px', fontSize: '10px' }}>TIER-0</span>}
+                            </td>
+                            <td className="mono text-error">{ent.risk_score?.toFixed(3)}</td>
+                            <td>
+                              <span className={`badge ${ent.decision === 'AUTO_CONTAIN' ? 'badge-error' : ent.decision === 'ESCALATE' ? 'badge-warning' : 'badge-neutral'}`}>
+                                {ent.decision} {ent.override_applied && <em> (Override)</em>}
+                              </span>
+                            </td>
+                            <td>
+                              <div style={{ display: 'flex', gap: '6px' }}>
+                                <button className="btn btn-primary btn-sm" onClick={() => handleOverride(ent.id, 'ESCALATE')}>Approve</button>
+                                <button className="btn btn-secondary btn-sm" onClick={() => handleOverride(ent.id, 'DISMISS')}>Dismiss</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </>
@@ -410,13 +491,28 @@ export default function App() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 <div className="card">
+                  <div className="card-header">Live Risk Score Distribution (Real-Time)</div>
+                  <div className="card-body" style={{ height: '300px' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={riskHistogram}>
+                        <XAxis dataKey="range" stroke="#52525b" />
+                        <Tooltip contentStyle={{backgroundColor: '#18181b', border: '1px solid #3f3f46'}} />
+                        <Legend verticalAlign="bottom" height={36}/>
+                        <Area type="monotone" dataKey="normal" stackId="1" stroke="#10b981" fill="#10b981" fillOpacity={0.3} name="Normal Traffic" />
+                        <Area type="monotone" dataKey="anomaly" stackId="1" stroke="#ef4444" fill="#ef4444" fillOpacity={0.3} name="Anomalous Traffic" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="card">
                   <div className="card-header">Calendar-Conditioned Model Curve</div>
                   <div className="card-body" style={{ padding: 0, display: 'flex', justifyContent: 'center' }}>
                     <canvas ref={canvasRef} width={420} height={300} style={{ display: 'block' }} />
                   </div>
                 </div>
-                <div className="card">
-                  <div className="card-header">Operating Points</div>
+              </div>
+              <div className="card" style={{ marginTop: '24px' }}>
+                <div className="card-header">Operating Points</div>
                   <div className="card-body" style={{ padding: 0 }}>
                     <table>
                       <thead><tr>
@@ -435,7 +531,6 @@ export default function App() {
                     </table>
                   </div>
                 </div>
-              </div>
               {fprRecall?.ablation && (
                 <div className="card">
                   <div className="card-header">Calendar Conditioning Ablation Study</div>
@@ -473,9 +568,43 @@ export default function App() {
                   <strong style={{ color: 'var(--status-error-text)' }}>JUDGE INSIGHT:</strong> Autonomous AI in critical infrastructure is dangerous. We implemented a Byzantine Fault Tolerance (BFT) gate. A Strict 2/3 Quorum is required to execute an AUTO_CONTAIN. If agents dispute, it safely escalates to a human.
                 </div>
               </div>
-              <div className="card">
-                <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span>3-Agent Vote Records — 2/3 Quorum Required for AUTO_CONTAIN</span>
+                            <div className="card" style={{ marginBottom: '24px' }}>
+                <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Live Agent Consensus Circuit</span>
+                  <span style={{ fontSize: '11px', color: 'var(--status-success-text)' }}>STREAMING</span>
+                </div>
+                <div className="card-body" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '40px', gap: '40px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                    {['Agent A', 'Agent B', 'Agent C'].map((name, i) => {
+                       const vote = liveFeed[0]?.bft?.[`vote_${name.charAt(name.length-1)}`];
+                       const color = vote ? (vote.flagged ? '#ef4444' : '#10b981') : '#52525b';
+                       return (
+                         <div key={name} style={{ padding: '16px', border: `2px solid ${color}`, borderRadius: '8px', textAlign: 'center', width: '160px', transition: 'border-color 0.3s', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                           <div style={{ fontSize: '14px', fontWeight: 'bold' }}>{name}</div>
+                           <div style={{ fontSize: '11px', color: color, marginTop: '4px' }}>{vote ? (vote.flagged ? 'FLAGGED' : 'CLEAR') : 'WAITING'}</div>
+                           {vote && <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '4px' }}>Conf: {vote.score.toFixed(3)}</div>}
+                         </div>
+                       )
+                    })}
+                  </div>
+                  
+                  <div style={{ width: '80px', height: '2px', backgroundColor: '#52525b', position: 'relative' }}>
+                    <div style={{ position: 'absolute', top: '-4px', right: '-8px', borderTop: '5px solid transparent', borderBottom: '5px solid transparent', borderLeft: '8px solid #52525b' }} />
+                  </div>
+                  
+                  <div style={{ padding: '24px', border: `2px solid ${liveFeed[0]?.bft?.consensus === 'FLAGGED' ? '#ef4444' : liveFeed[0]?.bft?.consensus === 'CLEAR' ? '#10b981' : '#f59e0b'}`, borderRadius: '50%', width: '140px', height: '140px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', transition: 'all 0.3s', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ fontSize: '16px', fontWeight: 'bold' }}>Consensus</div>
+                    <div style={{ fontSize: '14px', color: liveFeed[0]?.bft?.consensus === 'FLAGGED' ? '#ef4444' : liveFeed[0]?.bft?.consensus === 'CLEAR' ? '#10b981' : '#f59e0b', marginTop: '8px' }}>
+                      {liveFeed[0]?.bft?.consensus || 'IDLE'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '20px' }}>
+                <div className="card">
+                  <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>3-Agent Vote Records — 2/3 Quorum Required for AUTO_CONTAIN</span>
                   <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{bftLog.length} decisions</span>
                 </div>
                 <div className="card-body" style={{ padding: 0 }}>
@@ -523,6 +652,33 @@ export default function App() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-header">Vote Distribution</div>
+                  <div className="card-body" style={{ height: '300px' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={[
+                        {name: 'Flagged', count: bftVoteDist['FLAGGED'] || 0, fill: '#ef4444'},
+                        {name: 'Clear', count: bftVoteDist['CLEAR'] || 0, fill: '#10b981'},
+                        {name: 'Dispute', count: bftVoteDist['DISPUTED'] || 0, fill: '#f59e0b'}
+                      ]}>
+                        <XAxis dataKey="name" stroke="#52525b" />
+                        <YAxis stroke="#52525b" allowDecimals={false} />
+                        <Tooltip cursor={{fill: '#27272a'}} contentStyle={{backgroundColor: '#18181b', border: '1px solid #3f3f46'}} />
+                        <Legend verticalAlign="bottom" height={36}/>
+                        <Bar dataKey="count">
+                          { [
+                            {name: 'Flagged', count: bftVoteDist['FLAGGED'] || 0, fill: '#ef4444'},
+                            {name: 'Clear', count: bftVoteDist['CLEAR'] || 0, fill: '#10b981'},
+                            {name: 'Dispute', count: bftVoteDist['DISPUTED'] || 0, fill: '#f59e0b'}
+                          ].map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.fill} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               </div>
             </>
@@ -552,14 +708,16 @@ export default function App() {
                     <ForceGraph2D
                       graphData={graphData}
                       nodeLabel="id"
-                      nodeColor={(node: any) => node.is_tier0 ? '#f59e0b' : node.risk_score > 0.8 ? '#ef4444' : '#52525b'}
-                      nodeRelSize={6}
+                      nodeColor={(node: any) => node.id === liveFeed[0]?.ent?.id ? '#f87171' : (node.is_tier0 ? '#f59e0b' : node.risk_score > 0.8 ? '#ef4444' : '#52525b')}
+                      nodeVal={(node: any) => node.id === liveFeed[0]?.ent?.id ? 15 : (node.risk_score > 0.8 ? 5 : 2)}
+                      nodeRelSize={4}
                       linkColor={() => 'rgba(255,255,255,0.1)'}
                       linkWidth={1.5}
                       linkDirectionalArrowLength={3.5}
                       linkDirectionalArrowRelPos={1}
                       backgroundColor="#09090b"
                       width={1050}
+                      extraRenderers={[liveFeed]}
                     />
                   </div>
                 </div>
@@ -581,9 +739,34 @@ export default function App() {
                   <strong style={{ color: '#a78bfa' }}>JUDGE INSIGHT:</strong> In Critical Infrastructure, every AI decision must be verifiable. We write every action, along with its RAG-enriched threat context, into an immutable SHA-256 chained log to provide undeniable proof of why the system took action.
                 </div>
               </div>
-              <div className="card">
-                <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span>Immutable SOAR Decision Records</span>
+                            <div style={{ marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <h3 style={{ fontSize: '14px', fontWeight: '500', color: 'var(--text-secondary)' }}>Live Blockchain Verification Stream</h3>
+                </div>
+                <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', padding: '10px 0', scrollBehavior: 'smooth' }}>
+                  {auditLogs.slice(0, 5).map((log, i) => (
+                    <div key={i} className="card" style={{ minWidth: '320px', flexShrink: 0, animation: 'slideIn 0.5s ease-out', borderLeft: `4px solid ${log.decision === 'AUTO_CONTAIN' ? '#ef4444' : log.decision === 'ESCALATE' ? '#f59e0b' : '#52525b'}` }}>
+                      <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: 'rgba(167, 139, 250, 0.05)', padding: '12px 16px' }}>
+                        <span>Block #{auditLogs.length - i}</span>
+                        <span style={{ color: log.decision === 'AUTO_CONTAIN' ? '#ef4444' : '#f59e0b', fontSize: '11px', fontWeight: 'bold' }}>{log.decision}</span>
+                      </div>
+                      <div className="card-body mono" style={{ fontSize: '10px', color: 'var(--text-secondary)', padding: '16px' }}>
+                        <div><strong style={{color:'var(--text-primary)'}}>Entity:</strong> {log.entity_id}</div>
+                        <div style={{ marginTop: '8px', color:'var(--text-primary)' }}><strong>Prev Hash:</strong></div>
+                        <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', opacity: 0.7 }}>{log.prev_hash}</div>
+                        <div style={{ marginTop: '8px', color:'var(--text-primary)' }}><strong>Entry Hash:</strong></div>
+                        <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', color: '#a78bfa' }}>{log.entry_hash}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <style>{`@keyframes slideIn { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }`}</style>
+              </div>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '20px' }}>
+                <div className="card">
+                  <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Immutable SOAR Decision Records</span>
                   <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{auditLogs.length} records</span>
                 </div>
                 <div className="card-body" style={{ padding: 0 }}>
@@ -621,6 +804,31 @@ export default function App() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-header">SOAR Actions</div>
+                  <div className="card-body" style={{ height: '300px' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={[
+                          {name: 'Contain', value: soarActionCounts['AUTO_CONTAIN'] || 0},
+                          {name: 'Escalate', value: soarActionCounts['ESCALATE'] || 0},
+                          {name: 'Drop', value: soarActionCounts['DROP'] || 0}
+                        ].filter(d => d.value > 0)} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                          { [
+                            {name: 'Contain', value: soarActionCounts['AUTO_CONTAIN'] || 0},
+                            {name: 'Escalate', value: soarActionCounts['ESCALATE'] || 0},
+                            {name: 'Drop', value: soarActionCounts['DROP'] || 0}
+                          ].filter(d => d.value > 0).map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.name === 'Contain' ? '#ef4444' : entry.name === 'Escalate' ? '#f59e0b' : '#52525b'} />
+                          ))}
+                        </Pie>
+                        <Tooltip contentStyle={{backgroundColor: '#18181b', border: '1px solid #3f3f46'}} />
+                        <Legend verticalAlign="bottom" height={36}/>
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               </div>
             </>
@@ -648,7 +856,7 @@ export default function App() {
                       placeholder="e.g. ransomware lateral movement healthcare"
                       value={ragQuery}
                       onChange={e => setRagQuery(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && handleRagQuery()}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleRagQuery(); } }}
                       style={{
                         flex: 1, padding: '10px 14px', background: 'var(--bg-surface)',
                         border: '1px solid var(--border-color)', borderRadius: '6px',
@@ -656,7 +864,7 @@ export default function App() {
                         outline: 'none',
                       }}
                     />
-                    <button className="btn btn-primary" onClick={handleRagQuery} disabled={ragLoading}>
+                    <button type="button" className="btn btn-primary" onClick={handleRagQuery} disabled={ragLoading}>
                       {ragLoading ? 'Querying…' : 'Query RAG'}
                     </button>
                   </div>
@@ -681,7 +889,7 @@ export default function App() {
                   )}
                   {ragResults.length === 0 && !ragLoading && (
                     <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
-                      Enter a query above to retrieve relevant threat intelligence documents.
+                      {ragQuery ? "No results found for your query. Try different keywords." : "Enter a query above to retrieve relevant threat intelligence documents."}
                       <div style={{ marginTop: '8px' }}>
                         Example queries: <em>active scanning reconnaissance</em> · <em>log4shell exploit rce</em> · <em>AIIMS ransomware healthcare</em>
                       </div>

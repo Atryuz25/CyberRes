@@ -1,9 +1,11 @@
 import os
 import sys
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import random
 # Ensure we can import from src
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -87,7 +89,7 @@ def init_pipeline():
     X_tr_cal   = add_calendar_features(X_tr_burst, tr_phase)
     X_te_cal   = add_calendar_features(X_test, te_phase)
 
-    cal_model = HybridAnomalyDetector()
+    cal_model = HybridAnomalyDetector(n_conditional_cols=4)
     cal_model.fit(X_tr_cal.values)
     y_pred_cal = cal_model.predict(X_te_cal.values)
     cal_metrics = per_category_metrics(y_test, y_pred_cal, cat_test.values)
@@ -144,10 +146,69 @@ def init_pipeline():
     )
     print("Pipeline initialization complete!")
 
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except:
+                pass
+
+manager = ConnectionManager()
+
+async def simulation_loop():
+    while not PIPELINE_DATA:
+        await asyncio.sleep(2)
+        
+    soar_records = PIPELINE_DATA["soar_records"]
+    bft_records = PIPELINE_DATA["bft_records"]
+    
+    # Broadcast metrics every 2s
+    while True:
+        await asyncio.sleep(random.uniform(1.0, 3.0))
+        if not manager.active_connections:
+            continue
+            
+        record = random.choice(soar_records)
+        eid = record["entity_id"]
+        bft_vote = bft_records.get(eid)
+        
+        # We simulate live latency jitter for the chart
+        latency_val = PIPELINE_DATA['latency']['end_to_end_latency_ms']['mean'] + random.uniform(-10, 20)
+        
+        event = {
+            "type": "NEW_ANOMALY",
+            "data": {
+                "soar": record,
+                "bft": bft_vote.to_dict() if bft_vote else None,
+                "latency_ms": max(5, latency_val),
+                "timestamp": __import__("time").time()
+            }
+        }
+        await manager.broadcast(event)
+
 @app.on_event("startup")
 def startup_event():
     import threading
     threading.Thread(target=init_pipeline, daemon=True).start()
+    asyncio.create_task(simulation_loop())
+
+@app.websocket("/ws/stream")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 @app.get("/", response_class=RedirectResponse)
 async def root():

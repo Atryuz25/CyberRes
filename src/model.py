@@ -49,6 +49,7 @@ class HybridAnomalyDetector:
     random_state: int = 42
     iforest_weight: float = 0.6
     recon_weight: float = 0.4
+    n_conditional_cols: int = 0
 
     def __post_init__(self):
         self.scaler = RobustScaler()
@@ -84,21 +85,34 @@ class HybridAnomalyDetector:
     def fit(self, X_normal: np.ndarray):
         X_normal = np.asarray(X_normal, dtype=float)
 
-        col_min = X_normal.min(axis=0)
+        if self.n_conditional_cols > 0:
+            X_base = X_normal[:, :-self.n_conditional_cols]
+            X_cond = X_normal[:, -self.n_conditional_cols:]
+        else:
+            X_base = X_normal
+            X_cond = None
+
+        col_min = X_base.min(axis=0)
         nonneg = col_min >= 0
         with np.errstate(all="ignore"):
-            mean = X_normal.mean(axis=0)
-            std = X_normal.std(axis=0) + 1e-9
-            skew = np.mean(((X_normal - mean) / std) ** 3, axis=0)
+            mean = X_base.mean(axis=0)
+            std = X_base.std(axis=0) + 1e-9
+            skew = np.mean(((X_base - mean) / std) ** 3, axis=0)
         self._log_cols = np.where(nonneg & (np.abs(skew) > 2))[0]
 
-        Xl = self._apply_log(X_normal)
+        Xl = self._apply_log(X_base)
         Xs = self.scaler.fit_transform(Xl)
         self.autoencoder.fit(Xs, Xs)
         latent = self._encode(Xs)
-        self.iforest.fit(latent)
 
-        raw_train = self.iforest.decision_function(latent)
+        if X_cond is not None:
+            latent_for_iforest = np.hstack([latent, X_cond])
+        else:
+            latent_for_iforest = latent
+
+        self.iforest.fit(latent_for_iforest)
+
+        raw_train = self.iforest.decision_function(latent_for_iforest)
         recon_train = self.autoencoder.predict(Xs)
         recon_err_train = np.mean((Xs - recon_train) ** 2, axis=1)
         self._raw_lo, self._raw_hi = np.percentile(raw_train, [1, 99])
@@ -125,10 +139,24 @@ class HybridAnomalyDetector:
 
     def score(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
-        Xl = self._apply_log(X)
+
+        if self.n_conditional_cols > 0:
+            X_base = X[:, :-self.n_conditional_cols]
+            X_cond = X[:, -self.n_conditional_cols:]
+        else:
+            X_base = X
+            X_cond = None
+
+        Xl = self._apply_log(X_base)
         Xs = self.scaler.transform(Xl)
         latent = self._encode(Xs)
-        raw = self.iforest.decision_function(latent)
+
+        if X_cond is not None:
+            latent_for_iforest = np.hstack([latent, X_cond])
+        else:
+            latent_for_iforest = latent
+
+        raw = self.iforest.decision_function(latent_for_iforest)
         recon = self.autoencoder.predict(Xs)
         recon_err = np.mean((Xs - recon) ** 2, axis=1)
         return self._combine(raw, recon_err)
@@ -163,7 +191,13 @@ class HybridAnomalyDetector:
             top_features (list of {feature, reconstruction_error, normalized_contribution}).
         """
         X_row = np.asarray(X_row, dtype=float)
-        Xl = self._apply_log(X_row)
+        
+        if self.n_conditional_cols > 0:
+            X_base = X_row[:, :-self.n_conditional_cols]
+        else:
+            X_base = X_row
+            
+        Xl = self._apply_log(X_base)
         Xs = self.scaler.transform(Xl)
 
         # Per-feature reconstruction error

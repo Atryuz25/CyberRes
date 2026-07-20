@@ -127,10 +127,24 @@ class BFTConsensusLayer:
         normalized by the training-time calibration constants.
         """
         X_arr = np.asarray(X_row, dtype=float)
-        Xl = self.model._apply_log(X_arr)
+        
+        if self.model.n_conditional_cols > 0:
+            X_base = X_arr[:, :-self.model.n_conditional_cols]
+            X_cond = X_arr[:, -self.model.n_conditional_cols:]
+        else:
+            X_base = X_arr
+            X_cond = None
+            
+        Xl = self.model._apply_log(X_base)
         Xs = self.model.scaler.transform(Xl)
         latent = self.model._encode(Xs)
-        raw = self.model.iforest.decision_function(latent)
+        
+        if X_cond is not None:
+            latent_for_iforest = np.hstack([latent, X_cond])
+        else:
+            latent_for_iforest = latent
+            
+        raw = self.model.iforest.decision_function(latent_for_iforest)
         # Normalize using training-time bounds
         iforest_norm = float(np.clip(
             1 - (raw[0] - self.model._raw_lo) / (self.model._raw_hi - self.model._raw_lo + 1e-9),
