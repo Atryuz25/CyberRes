@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import ForceGraph2D from 'react-force-graph-2d'
 
 export default function App() {
   const [status, setStatus] = useState<string>('initializing')
@@ -11,6 +12,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>('guide')
   const [ragQuery, setRagQuery] = useState<string>('')
   const [ragResults, setRagResults] = useState<any[]>([])
+  const [ragStats, setRagStats] = useState<any>(null)
   const [ragLoading, setRagLoading] = useState<boolean>(false)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -67,7 +69,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: ragQuery, top_k: 3 })
       })
-      if (res.ok) { const d = await res.json(); setRagResults(d.results || []) }
+      if (res.ok) { const d = await res.json(); setRagResults(d.results || []); setRagStats(d.corpus_stats || null); }
     } catch (e) { console.error(e) }
     finally { setRagLoading(false) }
   }
@@ -483,6 +485,9 @@ export default function App() {
                                 <div style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
                                   {entry[vk]?.score?.toFixed(3)} / {entry[vk]?.threshold?.toFixed(3)}
                                 </div>
+                                <div style={{ fontSize: '9px', color: 'var(--text-secondary)', opacity: 0.8 }}>
+                                  [ {entry[vk]?.variant || 'unknown'} ]
+                                </div>
                               </div>
                             </td>
                           ))}
@@ -526,23 +531,20 @@ export default function App() {
                       {graphData.nodes?.length || 0} nodes · {(graphData.links || graphData.edges || []).length} edges
                     </span>
                   </div>
-                  <div className="card-body" style={{ padding: 0, maxHeight: 'calc(100vh - 240px)', overflowY: 'auto' }}>
-                    {/* Show top-25 highest-risk nodes as a structured list */}
-                    <table>
-                      <thead><tr>
-                        <th>Entity ID</th><th>Risk Score</th><th>Attack Category</th><th>Tier-0</th>
-                      </tr></thead>
-                      <tbody>
-                        {[...(graphData.nodes || [])].sort((a: any, b: any) => b.risk_score - a.risk_score).slice(0, 25).map((node: any, i: number) => (
-                          <tr key={i}>
-                            <td className="mono">{node.id}</td>
-                            <td className="mono text-error">{node.risk_score?.toFixed(4)}</td>
-                            <td><span className="badge badge-neutral">{node.attack_cat || 'Unknown'}</span></td>
-                            <td>{node.is_tier0 ? <span className="badge badge-warning">TIER-0</span> : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="card-body" style={{ padding: 0, height: 'calc(100vh - 240px)' }}>
+                    <ForceGraph2D
+                      graphData={graphData}
+                      nodeLabel="id"
+                      nodeColor={(node: any) => node.is_tier0 ? '#f59e0b' : node.risk_score > 0.8 ? '#ef4444' : '#52525b'}
+                      nodeRelSize={6}
+                      linkColor={() => 'rgba(255,255,255,0.1)'}
+                      linkWidth={1.5}
+                      linkDirectionalArrowLength={3.5}
+                      linkDirectionalArrowRelPos={1}
+                      backgroundColor="#09090b"
+                      width={800}
+                      height={600}
+                    />
                   </div>
                 </div>
               ) : (
@@ -573,7 +575,7 @@ export default function App() {
                     <thead><tr>
                       <th>Timestamp (UTC)</th>
                       <th>Entity ID</th>
-                      <th>MITRE Technique</th>
+                      <th>RAG Evidence & Context</th>
                       <th>Decision</th>
                       <th>SHA-256 Hash</th>
                     </tr></thead>
@@ -584,7 +586,12 @@ export default function App() {
                             {new Date((log.timestamp || 0) * 1000).toISOString().replace('T', ' ').substring(0, 19)}
                           </td>
                           <td className="mono">{log.entity_id}</td>
-                          <td className="mono text-muted">{log.mitre_technique || '—'}</td>
+                          <td>
+                            <div className="mono text-muted" style={{ fontSize: '11px', marginBottom: '4px' }}>{log.mitre_technique || '—'}</div>
+                            <div style={{ fontSize: '10px', color: 'var(--text-secondary)', maxWidth: '300px', whiteSpace: 'normal', fontStyle: 'italic' }}>
+                              {log.evidence ? log.evidence : 'No RAG evidence available.'}
+                            </div>
+                          </td>
                           <td>
                             <span className={`badge ${decisionBadgeClass(log.decision)}`}>
                               {log.decision} {log.override_applied && <em> (Override)</em>}
@@ -610,7 +617,14 @@ export default function App() {
                 <h2 className="page-title">Threat Intelligence RAG Query</h2>
               </div>
               <div className="card">
-                <div className="card-header">TF-IDF Retrieval over MITRE ATT&CK / CVE / CERT-In Corpus</div>
+                <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>TF-IDF Retrieval over MITRE ATT&CK / CVE / CERT-In Corpus</span>
+                  {ragStats && (
+                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      Total Documents: {ragStats.total_documents} (Techniques: {ragStats.mitre_count})
+                    </span>
+                  )}
+                </div>
                 <div className="card-body">
                   <div style={{ display: 'flex', gap: '12px', marginBottom: '20px' }}>
                     <input
