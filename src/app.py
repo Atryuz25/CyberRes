@@ -1,796 +1,660 @@
 """
-app.py — ET Cyber Resilience Command Center
-Streamlit dashboard. Strict black-and-white minimalist aesthetic.
-Focus: BFT consensus log, human-in-the-loop override gate, live metrics.
+streamlit_app.py
+AI-Driven Cyber Resilience SOC Dashboard — Streamlit edition.
 
-Run:  streamlit run src/app.py
-      streamlit run src/app.py -- --synthetic
+Strict black-and-white theme as per checklist item I.
+All panels pull from FastAPI REST endpoints — zero hardcoded/mock data.
+
+Run:
+    streamlit run streamlit_app.py
+(FastAPI must be running at http://localhost:8000 first)
 """
 
-from __future__ import annotations
-import sys, os, json, time
-import numpy as np
-import pandas as pd
+import time
+import requests
 import streamlit as st
+import pandas as pd
+import numpy as np
+import networkx as nx
 import plotly.graph_objects as go
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from data_loader import load_raw, prepare_features, make_synthetic_dataset, ATTACK_CATEGORIES
-from calendar_features import assign_calendar_phase, add_calendar_features, inject_legitimate_bursts
-from temporal_features import add_temporal_features
-from model import HybridAnomalyDetector
-from evaluate import per_category_metrics, calendar_ablation, fpr_recall_tradeoff
-from mitre_rag import attribute, attribution_accuracy
-from soar import ResponseOrchestrator, TIER0_WHITELIST, RISK_THRESHOLD_ESCALATE, RISK_THRESHOLD_AUTO_ACTION
-from latency import measure_pipeline_latency
-from knowledge_graph import MITREKnowledgeGraph
-from rag_engine import RAGEngine
-from graph import build_graph
-from bft_consensus import BFTConsensusLayer
-
-VOLUME_COLS = ["sbytes", "dbytes", "spkts", "dpkts", "sload", "dload", "rate"]
-
 # ── Page config ──────────────────────────────────────────────────────────────
+
 st.set_page_config(
     page_title="ET // Cyber Command",
-    page_icon="⬛",
+    page_icon="🛡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Global B&W CSS ───────────────────────────────────────────────────────────
+# Strict black-and-white custom CSS
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+/* Import monospace font */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600&display=swap');
 
-html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+/* Full black background */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
     background-color: #000000 !important;
     color: #ffffff !important;
-    font-family: 'IBM Plex Sans', sans-serif;
+    font-family: 'Inter', sans-serif !important;
 }
+
+/* Sidebar */
 [data-testid="stSidebar"] {
     background-color: #0a0a0a !important;
-    border-right: 1px solid #222;
+    border-right: 1px solid #1a1a1a !important;
 }
-[data-testid="stSidebar"] * { color: #cccccc !important; }
-[data-testid="metric-container"] {
-    background: #0d0d0d;
-    border: 1px solid #2a2a2a;
-    padding: 1rem;
-    border-radius: 0;
+[data-testid="stSidebar"] * { color: #d0d0d0 !important; }
+[data-testid="stSidebar"] .stRadio label { color: #888 !important; }
+
+/* Cards and sections */
+[data-testid="stMetric"] {
+    background: #0f0f0f !important;
+    border: 1px solid #1e1e1e !important;
+    border-radius: 6px !important;
+    padding: 12px !important;
 }
-[data-testid="stMetricValue"] {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 1.8rem !important;
-    font-weight: 600 !important;
+[data-testid="stMetricValue"] { color: #ffffff !important; font-family: 'JetBrains Mono', monospace !important; }
+[data-testid="stMetricLabel"] { color: #666 !important; }
+[data-testid="stMetricDelta"] { color: #888 !important; }
+
+/* Headers */
+h1, h2, h3 { color: #ffffff !important; font-family: 'Inter', sans-serif !important; }
+h1 { font-size: 18px !important; letter-spacing: 0.05em !important; text-transform: uppercase; }
+h2 { font-size: 15px !important; }
+
+/* Dataframes / tables */
+[data-testid="stDataFrame"] { background: #0a0a0a !important; border: 1px solid #1e1e1e !important; }
+.dataframe { background: #000 !important; color: #ccc !important; }
+.dataframe th { background: #111 !important; color: #888 !important; border-bottom: 1px solid #222 !important; }
+.dataframe td { border-bottom: 1px solid #1a1a1a !important; }
+
+/* Buttons */
+.stButton button {
+    background: #1a1a1a !important;
     color: #ffffff !important;
+    border: 1px solid #333 !important;
+    border-radius: 4px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 12px !important;
+    transition: border-color 0.2s;
 }
-[data-testid="stMetricLabel"] { color: #888 !important; font-size: 0.75rem !important; }
-[data-testid="stMetricDelta"] { font-family: 'IBM Plex Mono', monospace !important; }
-h1, h2, h3 {
-    font-family: 'IBM Plex Sans', sans-serif !important;
+.stButton button:hover { border-color: #ffffff !important; }
+.stButton button[kind="primary"] { background: #ffffff !important; color: #000000 !important; }
+
+/* Text inputs */
+.stTextInput input, .stNumberInput input {
+    background: #0a0a0a !important;
     color: #ffffff !important;
-    letter-spacing: -0.02em;
-    border-bottom: 1px solid #1a1a1a;
-    padding-bottom: 0.3rem;
+    border: 1px solid #222 !important;
+    border-radius: 4px !important;
+    font-family: 'JetBrains Mono', monospace !important;
 }
-.stDataFrame, .stDataFrame * { background: #0d0d0d !important; color: #ddd !important; }
-.stButton > button {
-    background: #000 !important;
-    color: #fff !important;
-    border: 1px solid #444 !important;
-    border-radius: 0 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important;
-    padding: 0.4rem 1rem !important;
-    transition: border-color 0.15s;
-}
-.stButton > button:hover { border-color: #fff !important; }
-.stButton > button.approve { border-color: #00ff00 !important; color: #00ff00 !important; }
-.stButton > button.dismiss { border-color: #ff0000 !important; color: #ff0000 !important; }
-.stSelectbox > div, .stSlider > div { background: #0d0d0d !important; }
-[data-testid="stExpander"] { background: #0d0d0d !important; border: 1px solid #1a1a1a !important; }
-.stTabs [data-baseweb="tab-list"] { background: #000 !important; border-bottom: 1px solid #222; }
-.stTabs [data-baseweb="tab"] { color: #666 !important; font-family: 'IBM Plex Mono', monospace !important; font-size: 0.8rem; }
-.stTabs [aria-selected="true"] { color: #fff !important; border-bottom: 2px solid #fff !important; }
-.mono { font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem; color: #aaa; }
-.badge-critical { color: #ff0000; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
-.badge-escalate { color: #ff8800; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
-.badge-monitor  { color: #888888; font-family: 'IBM Plex Mono', monospace; }
-.badge-ok       { color: #00ff00; font-family: 'IBM Plex Mono', monospace; }
-.badge-disputed { color: #ffff00; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
+
+/* Tabs */
+[data-baseweb="tab-list"] { background: #000 !important; border-bottom: 1px solid #1e1e1e !important; }
+[data-baseweb="tab"] { color: #555 !important; }
+[aria-selected="true"] { color: #fff !important; border-bottom-color: #fff !important; }
+
+/* Divider */
 hr { border-color: #1a1a1a !important; }
+
+/* Badges / pills via markdown */
+.badge-red   { background:#1a0000; color:#ff4444; padding:2px 8px; border-radius:3px; font-size:11px; }
+.badge-white { background:#1a1a1a; color:#ffffff; padding:2px 8px; border-radius:3px; font-size:11px; }
+.badge-gray  { background:#111;    color:#888888; padding:2px 8px; border-radius:3px; font-size:11px; }
+
+/* Spinner */
+[data-testid="stSpinner"] { color: #fff !important; }
+
+/* Alerts */
+[data-testid="stAlert"] { background: #0a0a0a !important; border: 1px solid #1e1e1e !important; color: #aaa !important; }
+
+/* Selectbox */
+[data-baseweb="select"] { background: #0a0a0a !important; border-color: #222 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-def _mono(text): return f'<span class="mono">{text}</span>'
-def _badge(decision):
-    cls = {"AUTO_CONTAIN": "badge-critical", "ESCALATE_ONLY": "badge-critical",
-           "ESCALATE": "badge-escalate", "MONITOR": "badge-monitor",
-           "FLAGGED": "badge-critical", "DISPUTED": "badge-disputed",
-           "CLEARED": "badge-ok"}.get(decision, "badge-monitor")
-    return f'<span class="{cls}">● {decision}</span>'
+API_BASE = "http://localhost:8000"
 
-def _plotly_dark(fig, height=350):
-    fig.update_layout(
-        height=height,
-        paper_bgcolor="#000", plot_bgcolor="#000",
-        font=dict(color="#888", family="IBM Plex Mono, monospace", size=11),
-        xaxis=dict(showgrid=True, gridcolor="#111", zeroline=False,
-                   tickcolor="#333", linecolor="#222"),
-        yaxis=dict(showgrid=True, gridcolor="#111", zeroline=False,
-                   tickcolor="#333", linecolor="#222"),
-        margin=dict(t=30, b=50, l=50, r=20),
-        legend=dict(bgcolor="#000", bordercolor="#222", borderwidth=1),
-    )
-    return fig
+# ── API helpers ───────────────────────────────────────────────────────────────
 
-def _fetch_data_if_missing():
-    import urllib.request
-    from pathlib import Path
-    data_dir = Path(__file__).resolve().parent.parent / "data"
-    data_dir.mkdir(exist_ok=True)
-    base = ("https://raw.githubusercontent.com/Nir-J/ML-Projects/master/"
-            "UNSW-Network_Packet_Classification/")
-    for fname in ["UNSW_NB15_training-set.csv", "UNSW_NB15_testing-set.csv"]:
-        fpath = data_dir / fname
-        if not fpath.exists():
-            with st.spinner(f"Downloading {fname}…"):
-                urllib.request.urlretrieve(base + fname, fpath)
+@st.cache_data(ttl=30)
+def api_get(endpoint: str):
+    """GET request to FastAPI backend. Returns dict or None on failure."""
+    try:
+        r = requests.get(f"{API_BASE}{endpoint}", timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        st.error(f"Backend unreachable: {e}")
+    return None
 
-# ── Pipeline (cached) ─────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Training pipeline…")
-def load_pipeline(use_synthetic: bool, use_temporal: bool):
-    if use_synthetic:
-        train_df, test_df = make_synthetic_dataset()
+
+def api_post(endpoint: str, payload: dict):
+    """POST request to FastAPI backend."""
+    try:
+        r = requests.post(f"{API_BASE}{endpoint}", json=payload, timeout=10)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def badge(text: str, kind: str = "gray") -> str:
+    return f'<span class="badge-{kind}">{text}</span>'
+
+
+def decision_kind(d: str) -> str:
+    if not d:
+        return "gray"
+    dl = d.upper()
+    if "AUTO_CONTAIN" in dl:
+        return "red"
+    if "ESCALATE" in dl:
+        return "white"
+    return "gray"
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("## 🛡 ET // Cyber Command")
+    st.markdown("**AI-Driven Cyber Resilience**")
+    st.markdown("---")
+
+    # Pipeline status
+    status_data = api_get("/api/status")
+    if status_data and status_data.get("status") == "ready":
+        st.success("● PIPELINE READY")
     else:
-        try:
-            _fetch_data_if_missing()
-            train_df, test_df = load_raw()
-        except Exception:
-            st.warning("Real data unavailable — using synthetic fallback.")
-            train_df, test_df = make_synthetic_dataset()
+        st.warning("⏳ INITIALIZING...")
+        st.info("Pipeline trains on startup (~60s). Refresh when ready.")
+        st.stop()
 
-    X_train_n, X_train_f, X_test, y_test, cat_test = prepare_features(train_df, test_df)
-
-    if use_temporal:
-        X_train_n = add_temporal_features(X_train_n)
-        X_train_f = add_temporal_features(X_train_f)
-        X_test    = add_temporal_features(X_test)
-
-    feature_names = list(X_test.columns)
-
-    # Baseline
-    baseline = HybridAnomalyDetector()
-    baseline.fit(X_train_n.values)
-    y_pred_base = baseline.predict(X_test.values)
-    base_metrics = per_category_metrics(y_test, y_pred_base, cat_test.values)
-
-    # Calendar-conditioned
-    tr_phase  = assign_calendar_phase(len(X_train_n))
-    te_phase  = assign_calendar_phase(len(X_test), seed=99)
-    X_tr_burst = inject_legitimate_bursts(X_train_n.reset_index(drop=True), tr_phase, VOLUME_COLS)
-    X_tr_cal   = add_calendar_features(X_tr_burst, tr_phase)
-    X_te_cal   = add_calendar_features(X_test, te_phase)
-
-    cal_model = HybridAnomalyDetector()
-    cal_model.fit(X_tr_cal.values)
-    y_pred_cal = cal_model.predict(X_te_cal.values)
-    cal_metrics = per_category_metrics(y_test, y_pred_cal, cat_test.values)
-
-    # Ablation
-    norm_mask = y_test == 0
-    X_norm = X_test[norm_mask].reset_index(drop=True)
-    bph = assign_calendar_phase(len(X_norm), seed=123); bph[:] = "exam_period"
-    X_burst_cal = add_calendar_features(
-        inject_legitimate_bursts(X_norm, bph, VOLUME_COLS), bph).values
-    X_burst_raw = inject_legitimate_bursts(X_norm, bph, VOLUME_COLS).values
-    ablation = calendar_ablation(cal_model, baseline, X_burst_cal, X_burst_raw)
-
-    # Scores + entity IDs
-    scores     = cal_model.score(X_te_cal.values)
-    entity_ids = [f"10.0.{(i//256)%256}.{i%256}" for i in range(len(scores))]
-    flagged_idx = list(np.where(y_pred_cal == 1)[0])
-
-    # BFT layer
-    bft = BFTConsensusLayer(cal_model, tier0_whitelist=TIER0_WHITELIST)
-
-    # SOAR decisions + BFT for flagged entities (cap 100 for speed)
-    orchestrator = ResponseOrchestrator()
-    soar_records, bft_records = [], {}
-    for idx in flagged_idx[:100]:
-        eid   = entity_ids[idx]
-        score = float(scores[idx])
-        cat   = cat_test.values[idx]
-        attr  = attribute(cat)
-        tech  = attr.get("id") if attr else None
-        cr    = bft.vote(eid, X_te_cal.values[idx:idx+1])
-        bft_records[eid] = cr
-        rec   = orchestrator.handle(eid, score, tech, cr)
-        soar_records.append(rec)
-    orchestrator.audit_log.persist()
-
-    # Attribution accuracy
-    pred_cats = np.where(y_pred_cal == 1, cat_test.values, "Normal")
-    attr_acc  = attribution_accuracy(pred_cats.tolist(), cat_test.values.tolist())
-
-    # Latency
-    lat_orch = ResponseOrchestrator()
-    latency  = measure_pipeline_latency(cal_model, lat_orch, X_te_cal.values, n_sample=200)
-
-    # Graph + KG + RAG
-    attack_graph = build_graph(entity_ids, scores, cat_test.values.tolist(),
-                               tier0_whitelist=TIER0_WHITELIST, top_n=100)
-    kg  = MITREKnowledgeGraph()
-    rag = RAGEngine()
-
-    return dict(
-        X_te_cal=X_te_cal, y_test=y_test, y_pred_cal=y_pred_cal,
-        cat_test=cat_test, scores=scores, entity_ids=entity_ids,
-        feature_names=feature_names, flagged_idx=flagged_idx,
-        cal_metrics=cal_metrics, base_metrics=base_metrics, ablation=ablation,
-        attr_acc=attr_acc, soar_records=soar_records, bft_records=bft_records,
-        attack_graph=attack_graph, kg=kg, rag=rag, latency=latency,
-        cal_model=cal_model, orchestrator=orchestrator,
+    st.markdown("---")
+    page = st.radio(
+        "Navigation",
+        ["Overview & Metrics", "FPR-Recall Tradeoff", "BFT Vote Log",
+         "Lateral Movement Graph", "Audit Log", "Threat Intel RAG"],
+        label_visibility="collapsed",
     )
+    st.markdown("---")
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## ⬛ ET // CYBER COMMAND")
-st.sidebar.markdown('<span class="mono">AI-Driven CNI Protection</span>', unsafe_allow_html=True)
-st.sidebar.divider()
+    metrics_data = api_get("/api/metrics")
+    if metrics_data:
+        st.markdown(f"**FPR:** `{metrics_data.get('fpr', 0)*100:.2f}%`")
+        st.markdown(f"**Recall:** `{metrics_data.get('recall', 0)*100:.2f}%`")
+        st.markdown(f"**Samples:** `{metrics_data.get('n_samples', 0):,}`")
+        st.markdown(f"**Latency:** `{metrics_data.get('latency_ms', 0):.0f} ms`")
 
-use_synthetic = "--synthetic" in sys.argv or st.sidebar.toggle("Synthetic data mode", False)
-use_temporal  = st.sidebar.toggle("Rolling window features (temporal)", True)
+    if st.button("🔄 Refresh All Data"):
+        st.cache_data.clear()
+        st.rerun()
 
-d = load_pipeline(use_synthetic, use_temporal)
-cm = d["cal_metrics"]["overall"]
 
-st.sidebar.divider()
-st.sidebar.markdown('<span class="mono">LIVE METRICS</span>', unsafe_allow_html=True)
-st.sidebar.metric("Flagged", f"{len(d['flagged_idx']):,}")
-st.sidebar.metric("Precision", f"{cm.get('precision',0):.1%}")
-st.sidebar.metric("Recall",    f"{cm.get('recall',0):.1%}")
-st.sidebar.metric("Burst FPR reduction",
-                  f"{d['ablation'].get('relative_fpr_reduction',0)*100:.1f}%")
-st.sidebar.divider()
-chain_ok = d["orchestrator"].audit_log.verify_chain()
-st.sidebar.markdown(
-    f'<span class="{"badge-ok" if chain_ok else "badge-critical"}">{"● CHAIN VALID" if chain_ok else "● CHAIN BROKEN"}</span>',
-    unsafe_allow_html=True
-)
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: Overview & Metrics
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-t_overview, t_metrics, t_entities, t_graph = st.tabs([
-    "OVERVIEW", "METRICS", "ENTITIES // BFT", "GRAPH"
-])
+if page == "Overview & Metrics":
+    st.markdown("# OVERVIEW / DETECTION METRICS")
+    st.markdown("---")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OVERVIEW
-# ─────────────────────────────────────────────────────────────────────────────
-with t_overview:
-    st.title("CYBER RESILIENCE COMMAND CENTER")
-    st.markdown('<span class="mono">AI-driven protection for Critical National Infrastructure</span>', unsafe_allow_html=True)
-    st.divider()
+    d = api_get("/api/metrics")
+    if not d:
+        st.error("Could not load metrics."); st.stop()
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    n_flagged = len(d["flagged_idx"])
-    n_total   = len(d["y_test"])
-    lat_p95   = d["latency"]["end_to_end_latency_ms"]["p95"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("False Positive Rate", f"{d['fpr']*100:.2f}%",
+              delta=f"{d['fpr_delta']*100:+.2f}% vs baseline", delta_color="inverse")
+    c2.metric("Recall (Detection Rate)", f"{d['recall']*100:.2f}%",
+              delta=f"{d['recall_delta']*100:+.2f}% vs baseline")
+    c3.metric("Burst FPR Reduction", f"{d['burst_fpr_red']:.1f}%",
+              delta="calendar-conditioned")
+    c4.metric("End-to-End Latency", f"{d['latency_ms']:.0f} ms",
+              delta=f"vs {d['ibm_mtti']}d IBM MTTI", delta_color="off")
 
-    c1.metric("ENTITIES SCORED", f"{n_total:,}")
-    c2.metric("ANOMALIES FLAGGED", f"{n_flagged:,}")
-    c3.metric("SOAR ACTIONS", str(len(d["soar_records"])))
-    c4.metric("p95 DETECT+DECIDE", f"{lat_p95:.0f} ms")
-    c5.metric("ATTR. ACCURACY", f"{d['attr_acc']:.1%}")
+    st.markdown("---")
+    st.markdown("### Flagged Entities · Human-in-the-Loop Gate")
 
-    st.divider()
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-        st.subheader("TECHNOLOGY MATRIX")
-        techs = [
-            ("UEBA / Anomaly Detection",       "REAL",     "AE→IF, calibrated, calendar-conditioned"),
-            ("Temporal Windowing",              "REAL" if use_temporal else "DISABLED", "Rolling mean/std/min/max over 5-row window"),
-            ("Graph AI / Lateral Movement",    "REAL",     "NetworkX entity graph, pivot detection"),
-            ("RAG / Threat Intelligence",      "REAL",     "TF-IDF over MITRE+CVE+CERT-In corpus"),
-            ("Knowledge Graph (ATT&CK)",       "REAL",     "NetworkX kill-chain, 14 tactics"),
-            ("SOAR / Response Automation",     "PARTIAL",  "Decision logic real; API calls mocked"),
-            ("Agentic / Multi-Agent",          "REAL",     "Coordinator + 3 specialist agents"),
-            ("BFT Consensus",                  "REAL",     "3-agent 2/3 quorum before auto-contain"),
-        ]
-        for name, status, detail in techs:
-            icon = "●" if status == "REAL" else ("◑" if status == "PARTIAL" else "○")
-            color = "badge-ok" if status == "REAL" else ("badge-escalate" if status == "PARTIAL" else "badge-monitor")
-            st.markdown(
-                f'<span class="{color}">{icon} {status}</span> &nbsp;'
-                f'<span style="color:#fff;font-weight:600">{name}</span> &nbsp;'
-                f'<span class="mono">{detail}</span>',
-                unsafe_allow_html=True
+    entities_data = api_get("/api/entities")
+    if entities_data:
+        rows = entities_data.get("entities", [])
+        df_rows = []
+        for e in rows:
+            votes = e.get("votes", [])
+            vote_str = " / ".join(
+                f"{'🔴' if (v.get('flagged') if isinstance(v, dict) else v) else '🟢'}"
+                for v in votes
             )
+            df_rows.append({
+                "Entity ID": e["id"],
+                "Risk Score": f"{e['risk_score']:.4f}",
+                "Category": e["category"],
+                "Votes A/B/C": vote_str,
+                "Consensus": e.get("consensus", "—"),
+                "Decision": e.get("decision", "—"),
+                "Tier-0": "⚠ TIER-0" if e.get("tier0") else "",
+            })
+        df = pd.DataFrame(df_rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with col_right:
-        st.subheader("BFT CONSENSUS SUMMARY")
-        bft_records = d["bft_records"]
-        if bft_records:
-            counts = {"FLAGGED": 0, "DISPUTED": 0, "CLEARED": 0, "TIER0_OVERRIDE": 0}
-            for cr in bft_records.values():
-                counts[cr.consensus] = counts.get(cr.consensus, 0) + 1
+        st.markdown("### Human Override")
+        col_eid, col_act, col_btn = st.columns([3, 2, 1])
+        with col_eid:
+            entity_sel = st.selectbox("Select Entity", [r["id"] for r in rows], key="override_sel")
+        with col_act:
+            action_sel = st.selectbox("Action", ["ESCALATE", "DISMISS", "AUTO_CONTAIN"], key="override_act")
+        with col_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Apply Override", type="primary"):
+                result = api_post("/api/override", {"entity_id": entity_sel, "action": action_sel})
+                if result:
+                    st.success(f"Override applied: {entity_sel} → {action_sel}")
+                    st.cache_data.clear()
+                else:
+                    st.error("Override failed.")
 
-            for label, count in counts.items():
-                pct = count / len(bft_records) * 100 if bft_records else 0
-                st.markdown(
-                    f'{_badge(label)} &nbsp;<span class="mono">{count} entities ({pct:.0f}%)</span>',
-                    unsafe_allow_html=True
-                )
-            st.divider()
-            disputed = sum(1 for cr in bft_records.values() if cr.consensus == "DISPUTED")
-            st.markdown(
-                f'<span class="mono">AGENT DISAGREEMENT RATE: '
-                f'{disputed}/{len(bft_records)} entities '
-                f'({disputed/len(bft_records)*100:.0f}%) required human review</span>',
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown('<span class="mono">No BFT data — run with BFT enabled</span>', unsafe_allow_html=True)
 
-        st.divider()
-        st.subheader("RAG CORPUS")
-        stats = d["rag"].corpus_stats()
-        st.markdown(f'<span class="mono">{stats["total_documents"]} documents | {stats["vocabulary_size"]:,} terms</span>', unsafe_allow_html=True)
-        for t, c in stats["by_type"].items():
-            label = {"mitre_technique": "MITRE ATT&CK", "cve": "CVE", "cert_advisory": "CERT-In"}.get(t, t)
-            st.markdown(f'<span class="mono">  {label}: {c}</span>', unsafe_allow_html=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: FPR-Recall Tradeoff
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    st.divider()
-    st.subheader("JUDGING CRITERIA ALIGNMENT")
-    crit = [
-        ("Business Impact (25%)",      "Calendar-conditioning targets CBSE 2026 brief incident directly. 17.9% burst-FPR reduction."),
-        ("Technical Excellence (25%)", "Unsupervised (normal-only training). BFT consensus. Temporal windowing. RAG retrieval. Per-category metrics."),
-        ("Scalability (20%)",          "sklearn stack, no GPU. Streamlit Cloud. Data fetched at runtime. Graph capped to top-N."),
-        ("User Experience (15%)",      "This dashboard. Human-in-the-loop override gate. Explain-anomaly per feature. Audit log viewer."),
-        ("Innovation (15%)",           "Calendar-conditioning for CNI. BFT quorum before auto-contain. Multi-agent lateral movement re-invocation loop."),
-    ]
-    for name, desc in crit:
-        st.markdown(
-            f'<span style="color:#fff;font-weight:600;font-family:IBM Plex Mono,monospace">{name}</span> &nbsp;'
-            f'<span class="mono">{desc}</span>',
-            unsafe_allow_html=True
-        )
-        st.markdown("")
+elif page == "FPR-Recall Tradeoff":
+    st.markdown("# FPR-RECALL TRADEOFF CURVE")
+    st.markdown("---")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# METRICS
-# ─────────────────────────────────────────────────────────────────────────────
-with t_metrics:
-    st.header("MODEL EVALUATION")
+    d = api_get("/api/fpr_recall")
+    if not d:
+        st.error("Could not load FPR-Recall data."); st.stop()
 
-    bm = d["base_metrics"]["overall"]
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("PRECISION", f"{cm.get('precision',0):.3f}",
-              f"{cm.get('precision',0)-bm.get('precision',0):+.3f} vs baseline")
-    c2.metric("RECALL",    f"{cm.get('recall',0):.3f}",
-              f"{cm.get('recall',0)-bm.get('recall',0):+.3f} vs baseline")
-    c3.metric("FPR",       f"{cm.get('fpr',0):.3f}",
-              f"{cm.get('fpr',0)-bm.get('fpr',0):+.3f} vs baseline", delta_color="inverse")
-    c4.metric("BURST FPR Δ", f"{d['ablation'].get('relative_fpr_reduction',0)*100:.1f}%")
+    curve = d.get("tradeoff_curve", [])
+    ablation = d.get("ablation", {})
 
-    st.divider()
-    col_a, col_b = st.columns(2)
+    # Plotly chart — strict B&W
+    fig = go.Figure()
 
-    with col_a:
-        st.subheader("PER-CATEGORY RECALL")
-        cats = [c for c in d["cal_metrics"] if c != "overall"]
-        recalls_cal  = [d["cal_metrics"][c]["recall"]                          for c in cats]
-        recalls_base = [d["base_metrics"].get(c, {}).get("recall", 0)          for c in cats]
-        fig = go.Figure()
-        fig.add_bar(name="CALENDAR-CONDITIONED", x=cats, y=recalls_cal,
-                    marker_color="#ffffff")
-        fig.add_bar(name="BASELINE", x=cats, y=recalls_base,
-                    marker_color="#333333")
-        fig.update_layout(barmode="group", xaxis_tickangle=-40,
-                          legend=dict(orientation="h", y=1.05))
-        st.plotly_chart(_plotly_dark(fig), use_container_width=True)
+    # Diagonal reference
+    fig.add_trace(go.Scatter(
+        x=[0, 1], y=[0, 1], mode="lines",
+        line=dict(color="#333333", width=1, dash="dash"),
+        name="Random Classifier", showlegend=True
+    ))
 
-    with col_b:
-        st.subheader("ABLATION: BURST-TRAFFIC FPR")
-        abl = d["ablation"]
-        fig2 = go.Figure(go.Bar(
-            x=["BASELINE", "CALENDAR-CONDITIONED"],
-            y=[abl.get("fpr_without_calendar_conditioning",0),
-               abl.get("fpr_with_calendar_conditioning",0)],
-            marker_color=["#444", "#ffffff"],
-            text=[f"{v:.3f}" for v in [abl.get("fpr_without_calendar_conditioning",0),
-                                        abl.get("fpr_with_calendar_conditioning",0)]],
-            textposition="outside", textfont=dict(color="#fff", family="IBM Plex Mono"),
-        ))
-        fig2.update_layout(yaxis_title="FALSE POSITIVE RATE ON LEGITIMATE BURSTS")
-        st.plotly_chart(_plotly_dark(fig2), use_container_width=True)
+    fprs = [pt["fpr"] for pt in curve]
+    recalls = [pt["recall"] for pt in curve]
+    mults = [pt["threshold_multiplier"] for pt in curve]
 
-    st.divider()
-    st.subheader("FULL PER-CATEGORY TABLE")
-    rows = [{"CATEGORY": c, "RECALL": d["cal_metrics"][c]["recall"],
-             "N": d["cal_metrics"][c]["n_samples"]}
-            for c in cats]
-    df_m = pd.DataFrame(rows).sort_values("RECALL", ascending=False)
-    st.dataframe(df_m.style.format({"RECALL": "{:.3f}"}),
-                 use_container_width=True, hide_index=True)
+    fig.add_trace(go.Scatter(
+        x=fprs, y=recalls, mode="lines+markers+text",
+        line=dict(color="#ffffff", width=2.5),
+        marker=dict(color="#ffffff", size=8, line=dict(color="#000", width=2)),
+        text=[f"×{m}" for m in mults],
+        textposition="top right",
+        textfont=dict(color="#888888", size=10, family="JetBrains Mono"),
+        name="Calendar-Conditioned Model",
+    ))
 
-    st.divider()
-    st.subheader("LATENCY vs IBM 2025 BASELINE")
-    lat = d["latency"]
-    lc1,lc2,lc3,lc4 = st.columns(4)
-    lc1.metric("MEAN LATENCY",  f"{lat['end_to_end_latency_ms']['mean']:.2f} ms")
-    lc2.metric("p95 LATENCY",   f"{lat['end_to_end_latency_ms']['p95']:.2f} ms")
-    lc3.metric("IBM GLOBAL MTTI", f"{lat['baseline_mtti_days_global']} days")
-    lc4.metric("INDIA MTTI",    f"{lat['baseline_mtti_days_india_range'][0]}–{lat['baseline_mtti_days_india_range'][1]} days")
-    st.markdown('<span class="mono">CAVEAT: prototype shrinks model inference + analyst decision to &lt;50ms. Does not eliminate full 200-day dwell time — log ingestion, SIEM, pipeline delays are out of scope.</span>', unsafe_allow_html=True)
+    fig.update_layout(
+        paper_bgcolor="#000000", plot_bgcolor="#000000",
+        font=dict(color="#888888", family="JetBrains Mono"),
+        xaxis=dict(title="False Positive Rate", range=[0, 1],
+                   gridcolor="#1a1a1a", zerolinecolor="#333",
+                   tickfont=dict(color="#555")),
+        yaxis=dict(title="Recall (Detection Rate)", range=[0, 1.05],
+                   gridcolor="#1a1a1a", zerolinecolor="#333",
+                   tickfont=dict(color="#555")),
+        legend=dict(bgcolor="#0a0a0a", bordercolor="#222"),
+        title=dict(text="FPR-Recall Operating Points (threshold multipliers)", font=dict(size=14, color="#666")),
+        margin=dict(l=60, r=20, t=60, b=60),
+        height=420,
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-    col_cm, col_tradeoff = st.columns(2)
+    # Operating point table
+    st.markdown("### Operating Point Table")
+    df_curve = pd.DataFrame([{
+        "Threshold ×": pt["threshold_multiplier"],
+        "FPR": f"{pt['fpr']*100:.2f}%",
+        "Recall": f"{pt['recall']*100:.2f}%",
+        "Precision": f"{pt['precision']*100:.2f}%",
+        "Calibrated Threshold": pt["threshold"],
+        "Current": "★ Default" if pt["threshold_multiplier"] == 1.0 else "",
+    } for pt in curve])
+    st.dataframe(df_curve, use_container_width=True, hide_index=True)
 
-    with col_cm:
-        st.subheader("CONFUSION MATRIX")
-        ov = d["cal_metrics"]["overall"]
-        tp, fp = ov["tp"], ov["fp"]
-        fn, tn = ov["fn"], ov["tn"]
-        z    = [[tn, fp], [fn, tp]]
-        text = [[f"TN\n{tn:,}", f"FP\n{fp:,}"], [f"FN\n{fn:,}", f"TP\n{tp:,}"]]
-        fig_cm = go.Figure(go.Heatmap(
-            z=z,
-            x=["PREDICTED NORMAL", "PREDICTED ATTACK"],
-            y=["ACTUAL NORMAL", "ACTUAL ATTACK"],
-            text=text, texttemplate="%{text}",
-            colorscale=[[0, "#000"], [0.5, "#333"], [1, "#fff"]],
-            showscale=False,
-            textfont=dict(family="IBM Plex Mono", size=13, color="#fff"),
-        ))
-        fig_cm.update_layout(
-            height=280, margin=dict(t=10, b=10, l=10, r=10),
-            paper_bgcolor="#000", plot_bgcolor="#000",
-            font=dict(color="#888", family="IBM Plex Mono"),
-            xaxis=dict(side="top"),
-        )
-        st.plotly_chart(fig_cm, use_container_width=True)
+    # Ablation study
+    st.markdown("---")
+    st.markdown("### Calendar Conditioning Ablation Study")
+    st.markdown("""
+    Both inputs are **identical legitimate high-volume traffic** (exam-period bursts).
+    All labels = Normal. The calendar-naive model misflag them as attacks (false positives).
+    Calendar conditioning suppresses this.
+    """)
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Baseline FPR (no calendar)", f"{ablation.get('baseline_fpr', 0)*100:.2f}%",
+              help="Calendar-naive model FPR on legitimate burst traffic")
+    a2.metric("Calendar-Conditioned FPR", f"{ablation.get('cal_fpr', 0)*100:.2f}%",
+              delta=f"{(ablation.get('cal_fpr',0)-ablation.get('baseline_fpr',0))*100:+.2f}%", delta_color="inverse")
+    a3.metric("Relative FPR Reduction", f"{ablation.get('relative_fpr_reduction', 0)*100:.2f}%",
+              help="(baseline_fpr - cal_fpr) / baseline_fpr")
+    st.caption(f"n_samples = {ablation.get('n_samples', '?')} legitimate burst records (exam_period phase)")
 
-    with col_tradeoff:
-        st.subheader("FPR — RECALL TRADEOFF")
-        st.markdown('<span class="mono">Recall is a calibration knob, not a hard ceiling.</span>', unsafe_allow_html=True)
-        tradeoff = fpr_recall_tradeoff(d["cal_model"], d["X_te_cal"].values, d["y_test"])
-        td_df = pd.DataFrame(tradeoff)
-        fig_td = go.Figure()
-        fig_td.add_scatter(
-            x=td_df["fpr"], y=td_df["recall"],
-            mode="lines+markers+text",
-            line=dict(color="#ffffff", width=1.5),
-            marker=dict(color="#ffffff", size=8, symbol="circle"),
-            text=[f"{r['threshold_multiplier']}x" for r in tradeoff],
-            textposition="top center",
-            textfont=dict(family="IBM Plex Mono", size=9, color="#888"),
-        )
-        # Mark the operating point we use
-        fig_td.add_scatter(
-            x=[td_df.loc[td_df["threshold_multiplier"]==1.0, "fpr"].values[0]],
-            y=[td_df.loc[td_df["threshold_multiplier"]==1.0, "recall"].values[0]],
-            mode="markers",
-            marker=dict(color="#ff0000", size=12, symbol="circle"),
-            name="CURRENT SETTING",
-        )
-        fig_td.update_layout(
-            xaxis_title="FALSE POSITIVE RATE",
-            yaxis_title="RECALL (DETECTION RATE)",
-            xaxis=dict(range=[0, 1]), yaxis=dict(range=[0, 1.05]),
-            showlegend=False,
-        )
-        st.plotly_chart(_plotly_dark(fig_td, height=280), use_container_width=True)
-        st.markdown('<span class="mono">Red dot = current operating point (1.0x threshold)</span>', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTITIES // BFT
-# ─────────────────────────────────────────────────────────────────────────────
-with t_entities:
-    st.header("FLAGGED ENTITIES // BFT CONSENSUS LOG")
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: BFT Vote Log
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    flagged_idx = d["flagged_idx"]
-    scores      = d["scores"]
-    cat_test    = d["cat_test"]
-    entity_ids  = d["entity_ids"]
-    bft_records = d["bft_records"]
-    soar_lookup = {r["entity_id"]: r for r in d["soar_records"]}
+elif page == "BFT Vote Log":
+    st.markdown("# BFT CONSENSUS VOTE LOG")
+    st.markdown("---")
+    st.markdown("""
+    **3-Agent Byzantine Fault Tolerance gate** — auto-containment only fires on **2/3 quorum**.
+    - Agent A: standard calibrated threshold
+    - Agent B: conservative threshold (+0.02)
+    - Agent C: Isolation Forest-only score (independent signal)
+    """)
 
-    MAX_DISP = 150
+    d = api_get("/api/bft_log")
+    if not d:
+        st.error("Could not load BFT log."); st.stop()
+
+    bft_log = d.get("bft_log", [])
+    st.markdown(f"**{len(bft_log)} consensus decisions recorded**")
+
     rows = []
-    for i, idx in enumerate(flagged_idx[:MAX_DISP]):
-        eid   = entity_ids[idx]
-        score = float(scores[idx])
-        cat   = cat_test.values[idx]
-        attr  = attribute(cat)
-        soar  = soar_lookup.get(eid, {})
-        cr    = bft_records.get(eid)
-
+    for e in bft_log:
         rows.append({
-            "ENTITY": eid,
-            "RISK":   round(score, 3),
-            "CATEGORY": cat,
-            "TECHNIQUE": attr.get("name","—") if attr else "—",
-            "DECISION": soar.get("decision","—"),
-            "PLAYBOOK": soar.get("playbook_name","—"),
-            "TIER-0":  eid in TIER0_WHITELIST,
-            "BFT_A":   cr.votes[0].flagged if cr else None,
-            "BFT_B":   cr.votes[1].flagged if cr else None,
-            "BFT_C":   cr.votes[2].flagged if cr else None,
-            "CONSENSUS": cr.consensus if cr else "—",
-            "_idx": idx,
+            "Entity ID": e.get("entity_id", "?"),
+            "A Flagged": "🔴 YES" if e.get("vote_A", {}).get("flagged") else "🟢 NO",
+            "A Score": f"{e.get('vote_A', {}).get('score', 0):.4f}",
+            "B Flagged": "🔴 YES" if e.get("vote_B", {}).get("flagged") else "🟢 NO",
+            "B Score": f"{e.get('vote_B', {}).get('score', 0):.4f}",
+            "C Flagged": "🔴 YES" if e.get("vote_C", {}).get("flagged") else "🟢 NO",
+            "C Score (IF-only)": f"{e.get('vote_C', {}).get('score', 0):.4f}",
+            "Vote Count": f"{e.get('vote_count', 0)}/3",
+            "Consensus": e.get("consensus", "?"),
+            "Recommended": e.get("recommended_decision", "?"),
         })
 
-    df_e = pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Filter
-    col_f1, col_f2 = st.columns([2,1])
-    with col_f1:
-        min_score = st.slider("MIN RISK SCORE", 0.0, 1.0,
-                              float(d["cal_model"].threshold_), 0.01)
-    with col_f2:
-        consensus_filter = st.selectbox("CONSENSUS FILTER",
-                                        ["ALL", "FLAGGED", "DISPUTED", "CLEARED"])
-
-    df_filtered = df_e[df_e["RISK"] >= min_score]
-    if consensus_filter != "ALL":
-        df_filtered = df_filtered[df_filtered["CONSENSUS"] == consensus_filter]
-
-    st.markdown(f'<span class="mono">{len(df_filtered)} entities shown</span>', unsafe_allow_html=True)
-    display_cols = ["ENTITY","RISK","CATEGORY","DECISION","CONSENSUS","BFT_A","BFT_B","BFT_C","TIER-0"]
-    st.dataframe(
-        df_filtered[display_cols].style.format({"RISK": "{:.3f}"}),
-        use_container_width=True, hide_index=True
-    )
-
-    st.divider()
-    # ── HUMAN-IN-THE-LOOP OVERRIDE GATE ─────────────────────────────────────
-    st.subheader("HUMAN-IN-THE-LOOP OVERRIDE GATE")
-    st.markdown('<span class="mono">Entities where agents DISPUTED — requires human decision before containment.</span>', unsafe_allow_html=True)
-
-    disputed_entities = [r for r in rows if r.get("CONSENSUS") == "DISPUTED"]
-    if not disputed_entities:
-        st.markdown('<span class="badge-ok">● NO DISPUTED ENTITIES — all decisions resolved by consensus</span>', unsafe_allow_html=True)
-    else:
-        for entity_row in disputed_entities[:10]:
-            eid = entity_row["ENTITY"]
-            cr  = bft_records.get(eid)
-            soar= soar_lookup.get(eid, {})
-
-            with st.expander(f"⬛ {eid}  |  RISK: {entity_row['RISK']:.3f}  |  {entity_row['CATEGORY']}", expanded=False):
-                col_v, col_s = st.columns([3, 2])
-                with col_v:
-                    st.markdown("**AGENT VOTES**")
-                    if cr:
-                        for v in cr.votes:
-                            flag_str = "FLAGGED" if v.flagged else "CLEARED"
-                            color = "badge-critical" if v.flagged else "badge-ok"
-                            st.markdown(
-                                f'<span class="mono">Agent {v.agent_id} '
-                                f'[{v.score_variant}] '
-                                f'score={v.risk_score:.3f} '
-                                f'thresh={v.threshold_used:.3f} → '
-                                f'<span class="{color}">{flag_str}</span></span>',
-                                unsafe_allow_html=True
-                            )
-                        st.markdown(
-                            f'<span class="mono">CONSENSUS: <span class="badge-disputed">{cr.consensus}</span> '
-                            f'({cr.vote_count}/3 agents flagged)</span>',
-                            unsafe_allow_html=True
-                        )
-                with col_s:
-                    st.markdown("**RECOMMENDED ACTION**")
-                    st.markdown(
-                        f'<span class="badge-escalate">ESCALATE — human review required</span>',
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(f'<span class="mono">Playbook: {soar.get("playbook_name","—")}</span>', unsafe_allow_html=True)
-                    st.markdown(f'<span class="mono">Steps auto-fired: {soar.get("automation_coverage","—")}</span>', unsafe_allow_html=True)
-
-                st.divider()
-                col_approve, col_dismiss, col_defer = st.columns(3)
-                with col_approve:
-                    if st.button(f"APPROVE ISOLATION [{eid[:15]}]",
-                                 key=f"approve_{eid}"):
-                        override = {
-                            "entity_id": eid,
-                            "action": "human_approved_isolation",
-                            "approved_by": "human_operator",
-                            "timestamp": time.time(),
-                            "original_consensus": cr.consensus if cr else None,
-                        }
-                        d["orchestrator"].audit_log.record(override)
-                        d["orchestrator"].audit_log.persist()
-                        st.success(f"ISOLATION APPROVED — logged to audit chain")
-                with col_dismiss:
-                    if st.button(f"DISMISS [{eid[:15]}]",
-                                 key=f"dismiss_{eid}"):
-                        override = {
-                            "entity_id": eid,
-                            "action": "human_dismissed_alert",
-                            "approved_by": "human_operator",
-                            "timestamp": time.time(),
-                        }
-                        d["orchestrator"].audit_log.record(override)
-                        d["orchestrator"].audit_log.persist()
-                        st.info(f"ALERT DISMISSED — logged to audit chain")
-                with col_defer:
-                    if st.button(f"DEFER 1H [{eid[:15]}]",
-                                 key=f"defer_{eid}"):
-                        st.warning("DEFERRED — entity will be re-evaluated in next cycle")
-
-    st.divider()
-    # ── ANOMALY EXPLANATION ──────────────────────────────────────────────────
-    st.subheader("ANOMALY EXPLANATION")
-    if rows:
-        sel = st.selectbox("SELECT ENTITY", [r["ENTITY"] for r in rows],
-                           key="explain_select")
-        sel_row = next((r for r in rows if r["ENTITY"] == sel), None)
-        if sel_row:
-            idx = sel_row["_idx"]
-            expl = d["cal_model"].explain_anomaly(
-                d["X_te_cal"].values[idx:idx+1],
-                d["feature_names"]
-            )
-            ec1,ec2,ec3 = st.columns(3)
-            ec1.metric("ANOMALY SCORE", f"{expl['anomaly_score']:.4f}")
-            ec2.metric("THRESHOLD",     f"{expl['threshold']:.4f}")
-            ec3.metric("STATUS", "ANOMALY" if expl["is_anomaly"] else "NORMAL")
-
-            feat_df = pd.DataFrame(expl["top_features"])
-            feat_df["normalized_contribution"] = feat_df["normalized_contribution"].map("{:.1%}".format)
-            feat_df.columns = ["FEATURE", "RECON ERROR", "CONTRIBUTION"]
-            st.dataframe(feat_df, use_container_width=True, hide_index=True)
-
-            # RAG + kill-chain
-            cat_for = sel_row["CATEGORY"]
-            col_r, col_k = st.columns(2)
-            with col_r:
-                st.markdown("**RAG EVIDENCE**")
-                enr = d["rag"].enrich_attribution(cat_for)
-                if enr.get("technique_doc"):
-                    st.markdown(f'<span class="mono">{enr["technique_doc"]["title"]}</span>', unsafe_allow_html=True)
-                    st.caption(enr["technique_doc"]["snippet"][:200])
-            with col_k:
-                st.markdown("**KILL-CHAIN CONTEXT**")
-                chain = d["kg"].get_attack_chain(cat_for)
-                if "error" not in chain:
-                    st.markdown(f'<span class="mono">{chain["technique_id"]} · {chain["tactic"]} · phase {chain["kill_chain_position"]+1}/{chain["kill_chain_total"]}</span>', unsafe_allow_html=True)
-                    if chain.get("subsequent_tactics"):
-                        st.caption("Next phases: " + " → ".join(chain["subsequent_tactics"]))
-
-    st.divider()
-    # ── AUDIT LOG ────────────────────────────────────────────────────────────
-    st.subheader("AUDIT LOG (SHA-256 HASH CHAIN)")
-    chain_valid = d["orchestrator"].audit_log.verify_chain()
-    st.markdown(
-        f'<span class="{"badge-ok" if chain_valid else "badge-critical"}">● CHAIN {"VALID" if chain_valid else "BROKEN"}</span> &nbsp; '
-        f'<span class="mono">{len(d["orchestrator"].audit_log.entries)} entries</span>',
-        unsafe_allow_html=True
-    )
-    if d["soar_records"]:
-        audit_df = pd.DataFrame([{
-            "ENTITY":    r["entity_id"],
-            "RISK":      round(r["risk_score"], 3),
-            "DECISION":  r["decision"],
-            "PLAYBOOK":  r.get("playbook_name", "—"),
-            "COVERAGE":  r.get("automation_coverage","—"),
-            "BFT":       r.get("bft_consensus", {}).get("consensus","—") if r.get("bft_consensus") else "—",
-        } for r in d["soar_records"][:20]])
-        st.dataframe(audit_df.style.format({"RISK": "{:.3f}"}),
-                     use_container_width=True, hide_index=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GRAPH
-# ─────────────────────────────────────────────────────────────────────────────
-with t_graph:
-    st.header("ENTITY ATTACK GRAPH")
-
-    ag = d["attack_graph"]
-    gs = ag.summary()
-    gc1,gc2,gc3,gc4 = st.columns(4)
-    gc1.metric("ENTITIES",    gs["n_entities"])
-    gc2.metric("EDGES",       gs["n_edges"])
-    gc3.metric("HIGH-RISK",   gs["n_high_risk"])
-    gc4.metric("TIER-0",      gs["n_tier0"])
-
-    # Lateral movement
-    fs_dict = {entity_ids[int(i)]: float(scores[int(i)])
-               for i in d["flagged_idx"][:100]}
-    lm = ag.find_lateral_movement(fs_dict)
-    if lm["paths"]:
-        st.markdown(
-            f'<span class="badge-critical">● {len(lm["paths"])} LATERAL MOVEMENT PATH(S) DETECTED — '
-            f'{len(lm["pivot_candidates"])} PIVOT NODE(S)</span>',
-            unsafe_allow_html=True
-        )
-        for path in lm["paths"][:5]:
-            st.markdown(f'<span class="mono">  {" → ".join(path)}</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="badge-ok">● NO LATERAL MOVEMENT DETECTED</span>', unsafe_allow_html=True)
-
-    st.divider()
-    # Plotly graph — pure B&W
-    gd = ag.to_plotly_data()
-    if gd["nodes"]:
-        nodes, edges = gd["nodes"], gd["edges"]
-        ex, ey = [], []
-        for e in edges:
-            ex += [e["x0"], e["x1"], None]
-            ey += [e["y0"], e["y1"], None]
-
-        fig_g = go.Figure()
-        fig_g.add_trace(go.Scatter(
-            x=ex, y=ey, mode="lines",
-            line=dict(width=0.5, color="#222"),
-            hoverinfo="none", showlegend=False,
+    # Summary donut (B&W)
+    if bft_log:
+        from collections import Counter
+        counts = Counter(e.get("consensus", "?") for e in bft_log)
+        fig2 = go.Figure(go.Pie(
+            labels=list(counts.keys()),
+            values=list(counts.values()),
+            hole=0.6,
+            marker=dict(colors=["#ffffff", "#555555", "#222222"]),
+            textfont=dict(color="#000"),
         ))
-
-        nx_arr = [n["x"] for n in nodes]
-        ny_arr = [n["y"] for n in nodes]
-        nr_arr = [n["risk_score"] for n in nodes]
-        nc_arr = [n["attack_cat"] for n in nodes]
-        ni_arr = [n["id"] for n in nodes]
-        nt_arr = [n["is_tier0"] for n in nodes]
-
-        # B&W: risk → shade of white/grey
-        node_colors = [
-            "#ffffff" if s >= 0.85 else
-            "#cccccc" if s >= 0.70 else
-            "#666666" if s >= 0.50 else
-            "#333333"
-            for s in nr_arr
-        ]
-        node_sizes = [max(6, int(s * 18)) for s in nr_arr]
-        node_syms  = ["diamond" if t0 else "circle" for t0 in nt_arr]
-
-        hover = [
-            f"<b>{nid}</b><br>Risk: {s:.3f}<br>Cat: {c}<br>{'◆ TIER-0' if t0 else ''}"
-            for nid, s, c, t0 in zip(ni_arr, nr_arr, nc_arr, nt_arr)
-        ]
-
-        fig_g.add_trace(go.Scatter(
-            x=nx_arr, y=ny_arr, mode="markers",
-            marker=dict(color=node_colors, size=node_sizes, symbol=node_syms,
-                        line=dict(width=1, color="#000")),
-            text=hover, hovertemplate="%{text}<extra></extra>",
-            showlegend=False,
-        ))
-
-        for n in nodes:
-            if n["is_tier0"]:
-                fig_g.add_annotation(x=n["x"], y=n["y"], text="T0",
-                                     showarrow=False, font=dict(size=8, color="#fff"),
-                                     yshift=14)
-
-        fig_g.update_layout(
-            height=550,
+        fig2.update_layout(
             paper_bgcolor="#000", plot_bgcolor="#000",
-            font=dict(color="#555", family="IBM Plex Mono"),
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            margin=dict(t=20, b=20, l=20, r=20),
+            font=dict(color="#888", family="JetBrains Mono"),
+            title="Consensus Distribution", height=280,
+            margin=dict(l=0, r=0, t=40, b=0),
+            showlegend=True,
+            legend=dict(bgcolor="#000", bordercolor="#222", font=dict(color="#888")),
         )
-        st.plotly_chart(fig_g, use_container_width=True)
-        st.markdown('<span class="mono">⬜ HIGH RISK (≥0.85) &nbsp; □ ESCALATE (≥0.70) &nbsp; ▪ MED &nbsp; · LOW &nbsp; ◆ TIER-0</span>', unsafe_allow_html=True)
-    else:
-        st.info("No graph data.")
+        col_chart, col_info = st.columns([1, 2])
+        with col_chart:
+            st.plotly_chart(fig2, use_container_width=True)
+        with col_info:
+            st.markdown("### Quorum Rule")
+            st.markdown("""
+            | Vote Count | Consensus | SOAR Action |
+            |---|---|---|
+            | 3/3 or 2/3 | **FLAGGED** | AUTO_CONTAIN |
+            | 1/3 | DISPUTED | ESCALATE → Human |
+            | 0/3 | CLEARED | MONITOR only |
+            | Tier-0 | TIER0_OVERRIDE | ESCALATE_ONLY |
+            """)
 
-    st.divider()
-    st.subheader("ATT&CK KILL-CHAIN EXPLORER")
-    sel_cat = st.selectbox("ATTACK CATEGORY", [c for c in ATTACK_CATEGORIES if c != "Normal"])
-    chain = d["kg"].get_attack_chain(sel_cat)
-    if "error" not in chain:
-        kc1,kc2,kc3 = st.columns(3)
-        kc1.metric("TECHNIQUE", chain["technique_id"])
-        kc2.metric("TACTIC",    chain["tactic"])
-        kc3.metric("PHASE",     f"{chain['kill_chain_position']+1}/{chain['kill_chain_total']}")
-        st.markdown(f'<span class="mono">{chain["description"]}</span>', unsafe_allow_html=True)
-        if chain.get("subsequent_tactics"):
-            st.markdown(f'<span class="mono">NEXT PHASES: {" → ".join(chain["subsequent_tactics"])}</span>', unsafe_allow_html=True)
-        related = d["kg"].get_related_techniques(chain["technique_id"])
-        if related:
-            st.dataframe(pd.DataFrame(related), use_container_width=True, hide_index=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: Lateral Movement Graph
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Lateral Movement Graph":
+    st.markdown("# LATERAL MOVEMENT ATTACK GRAPH")
+    st.markdown("---")
+
+    d = api_get("/api/graph")
+    if not d:
+        st.error("Could not load graph data."); st.stop()
+
+    nodes = d.get("nodes", [])
+    links = d.get("links", d.get("edges", []))
+
+    st.markdown(f"**{len(nodes)} entities** · **{len(links)} communication edges** (top-100 by risk score)")
+
+    if not nodes:
+        st.warning("Graph is empty — no high-risk entities found.")
+        st.stop()
+
+    # Reconstruct NetworkX graph for layout
+    G = nx.DiGraph()
+    for n in nodes:
+        G.add_node(n["id"], **n)
+    for e in links:
+        src = e.get("source", e.get("from", ""))
+        dst = e.get("target", e.get("to", ""))
+        if src and dst:
+            G.add_edge(src, dst, weight=e.get("weight", 1.0))
+
+    pos = nx.spring_layout(G, seed=42, k=2.0)
+
+    # Build Plotly scatter graph — B&W
+    edge_x, edge_y = [], []
+    for src, dst in G.edges():
+        x0, y0 = pos.get(src, (0, 0))
+        x1, y1 = pos.get(dst, (0, 0))
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+
+    node_x = [pos[n][0] for n in G.nodes()]
+    node_y = [pos[n][1] for n in G.nodes()]
+    node_data = [G.nodes[n] for n in G.nodes()]
+    node_text = [f"{n}<br>Score: {G.nodes[n].get('risk_score', 0):.3f}<br>{G.nodes[n].get('attack_cat', '')}" for n in G.nodes()]
+    node_color = ["#ff3333" if nd.get("is_tier0") else "#ffffff" for nd in node_data]
+    node_size = [max(6, int(nd.get("risk_score", 0) * 20)) for nd in node_data]
+
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(
+        x=edge_x, y=edge_y, mode="lines",
+        line=dict(width=0.8, color="#222222"),
+        hoverinfo="none", showlegend=False,
+    ))
+    fig3.add_trace(go.Scatter(
+        x=node_x, y=node_y, mode="markers+text",
+        marker=dict(size=node_size, color=node_color,
+                    line=dict(color="#333", width=1)),
+        text=list(G.nodes()),
+        textposition="top center",
+        textfont=dict(color="#555555", size=8, family="JetBrains Mono"),
+        hovertext=node_text,
+        hoverinfo="text",
+        showlegend=False,
+    ))
+    fig3.update_layout(
+        paper_bgcolor="#000000", plot_bgcolor="#000000",
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        height=520,
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+    # Top-risk table
+    st.markdown("### Highest Risk Entities")
+    sorted_nodes = sorted(node_data, key=lambda n: n.get("risk_score", 0), reverse=True)
+    df_nodes = pd.DataFrame([{
+        "Entity ID": n.get("id", "?"),
+        "Risk Score": f"{n.get('risk_score', 0):.4f}",
+        "Attack Category": n.get("attack_cat", "?"),
+        "Tier-0": "⚠ YES" if n.get("is_tier0") else "No",
+    } for n in sorted_nodes[:20]])
+    st.dataframe(df_nodes, use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: Audit Log
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Audit Log":
+    st.markdown("# SHA-256 HASH-CHAINED AUDIT LOG")
+    st.markdown("---")
+    st.markdown("""
+    Every SOAR decision is appended to an **immutable hash chain** (SHA-256).
+    `entry_hash = SHA256(prev_hash + json.dumps(event))`.
+    Tampering with any record breaks the chain.
+    """)
+
+    d = api_get("/api/audit")
+    if not d:
+        st.error("Could not load audit log."); st.stop()
+
+    logs = d.get("audit_logs", [])
+    st.markdown(f"**{len(logs)} log entries** · Chain integrity: `verify_chain()` runs on server startup")
+
+    rows = []
+    for log in logs:
+        ts = log.get("timestamp", 0)
+        ts_str = pd.Timestamp(ts, unit="s").strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
+        rows.append({
+            "Timestamp (UTC)": ts_str,
+            "Entity ID": log.get("entity_id", "?"),
+            "MITRE Technique": log.get("mitre_technique") or "—",
+            "Playbook": log.get("playbook_name") or "—",
+            "Decision": log.get("decision", "?"),
+            "Steps Run": log.get("automation_coverage", "?"),
+            "SHA-256 (first 24)": (log.get("entry_hash") or "")[:24] + "…",
+            "Override": "YES" if log.get("override_applied") else "",
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Decision distribution
+    if logs:
+        from collections import Counter
+        dec_counts = Counter(log.get("decision", "?") for log in logs)
+        st.markdown("### Decision Distribution")
+        fig4 = go.Figure(go.Bar(
+            x=list(dec_counts.keys()),
+            y=list(dec_counts.values()),
+            marker_color=["#ffffff" if k == "AUTO_CONTAIN" else "#555" for k in dec_counts.keys()],
+            text=list(dec_counts.values()),
+            textposition="outside",
+            textfont=dict(color="#888"),
+        ))
+        fig4.update_layout(
+            paper_bgcolor="#000", plot_bgcolor="#000",
+            xaxis=dict(tickfont=dict(color="#888", family="JetBrains Mono")),
+            yaxis=dict(gridcolor="#111", tickfont=dict(color="#555")),
+            height=280,
+            margin=dict(l=40, r=20, t=20, b=40),
+            font=dict(family="JetBrains Mono"),
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+
+    # RAG evidence panel for selected record
+    st.markdown("### RAG Evidence Drill-Down")
+    if logs:
+        sel_idx = st.selectbox("Select log entry", range(len(logs)),
+                               format_func=lambda i: f"[{i}] {logs[i].get('entity_id','?')} — {logs[i].get('decision','?')}")
+        sel = logs[sel_idx]
+        rag_ev = sel.get("rag_evidence")
+        top_feat = sel.get("top_anomaly_features")
+        c_rag, c_feat = st.columns(2)
+        with c_rag:
+            st.markdown("**RAG Evidence**")
+            if rag_ev:
+                st.json(rag_ev)
+            else:
+                st.caption("No RAG evidence in this record (older format).")
+        with c_feat:
+            st.markdown("**Top Anomaly Features**")
+            if top_feat:
+                st.json(top_feat)
+            else:
+                st.caption("No feature attribution in this record.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: Threat Intel RAG
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Threat Intel RAG":
+    st.markdown("# THREAT INTELLIGENCE RAG ENGINE")
+    st.markdown("---")
+    st.markdown("""
+    **TF-IDF retrieval** over a curated local corpus of:
+    - MITRE ATT&CK technique descriptions (8 techniques)
+    - Representative CVE summaries (2021–2024, Indian CNI–relevant)
+    - CERT-In advisory summaries (AIIMS 2022, CBSE 2024, Govt 2023, etc.)
+    """)
+
+    col_q, col_filter = st.columns([3, 1])
+    with col_q:
+        query = st.text_input("Query", placeholder="ransomware lateral movement healthcare",
+                              key="rag_query_input")
+    with col_filter:
+        doc_type_filter = st.selectbox("Doc type", ["All", "mitre_technique", "cve", "cert_advisory"])
+
+    col_k, col_btn = st.columns([1, 3])
+    with col_k:
+        top_k = st.number_input("Top-K results", min_value=1, max_value=10, value=3)
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        search = st.button("🔍 Query RAG", type="primary")
+
+    if search and query.strip():
+        payload = {
+            "query": query,
+            "top_k": int(top_k),
+            "doc_type": None if doc_type_filter == "All" else doc_type_filter,
+        }
+        with st.spinner("Retrieving..."):
+            result = api_post("/api/rag", payload)
+
+        if result:
+            docs = result.get("results", [])
+            stats = result.get("corpus_stats", {})
+            st.caption(f"Corpus: {stats.get('total_documents', '?')} docs · Vocabulary: {stats.get('vocabulary_size', '?')} terms")
+
+            if docs:
+                for doc in docs:
+                    kind_map = {"mitre_technique": "red", "cve": "white", "cert_advisory": "gray"}
+                    kind = kind_map.get(doc["type"], "gray")
+                    st.markdown(f"""
+---
+**`{doc['id']}`** &nbsp; {badge(doc['type'], kind)} &nbsp; Relevance: `{doc['score']:.4f}`
+
+**{doc['title']}**
+
+{doc['snippet']}
+""", unsafe_allow_html=True)
+            else:
+                st.warning("No relevant documents found for this query.")
+        else:
+            st.error("RAG query failed — is FastAPI running?")
+
+    # Quick reference
+    with st.expander("Example Queries"):
+        examples = [
+            "active scanning port scan reconnaissance",
+            "log4shell exploit rce initial access",
+            "AIIMS ransomware healthcare india",
+            "DNS tunneling C2 beaconing",
+            "lateral movement SMB worm propagation",
+            "exam season CBSE CERT-In education",
+        ]
+        for ex in examples:
+            if st.button(ex, key=f"ex_{ex}"):
+                st.session_state["rag_query_input"] = ex
+                st.rerun()

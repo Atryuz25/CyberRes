@@ -19,16 +19,21 @@ echo  Waiting 5s for server to bind...
 timeout /t 5 /nobreak > nul
 
 REM 2. Start Streamlit dashboard
-echo  [2/2] Starting Streamlit dashboard on http://localhost:8501 ...
+echo  [2/3] Starting Streamlit dashboard on http://localhost:8501 ...
+start "Streamlit Dashboard" cmd /k "cd /d %~dp0 && streamlit run src\app.py --server.port 8501 --browser.gatherUsageStats false"
+
+REM 3. Start React dashboard
+echo  [3/3] Starting React dashboard on http://localhost:5173 ...
+start "React Dashboard" cmd /k "cd /d %~dp0\frontend-app && npm run dev"
+
 echo.
 echo  ─────────────────────────────────────────
 echo  FastAPI:   http://localhost:8000
 echo  Streamlit: http://localhost:8501
-echo  React Dev: run separately with: cd frontend-app ^& npm run dev
+echo  React:     http://localhost:5173
 echo  ─────────────────────────────────────────
 echo.
-start "Streamlit Dashboard" cmd /k "cd /d %~dp0 && streamlit run streamlit_app.py --server.port 8501 --browser.gatherUsageStats false"
 
-echo  Both services started. Check the opened terminal windows for logs.
-echo  Pipeline initialization takes ~60s on first run.
+echo  All services started. Check the opened terminal windows for logs.
+echo  Pipeline initialization in FastAPI takes ~60s on first run.
 pause
