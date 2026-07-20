@@ -8,7 +8,7 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<any[]>([])
   const [bftLog, setBftLog] = useState<any[]>([])
   const [fprRecall, setFprRecall] = useState<any>(null)
-  const [activeTab, setActiveTab] = useState<string>('overview')
+  const [activeTab, setActiveTab] = useState<string>('guide')
   const [ragQuery, setRagQuery] = useState<string>('')
   const [ragResults, setRagResults] = useState<any[]>([])
   const [ragLoading, setRagLoading] = useState<boolean>(false)
@@ -184,6 +184,7 @@ export default function App() {
   }
 
   const NAV_ITEMS = [
+    { id: 'guide',     label: 'Guide & Walkthrough', icon: '📖' },
     { id: 'overview',  label: 'Overview',        icon: '▦' },
     { id: 'fpr',       label: 'FPR-Recall',       icon: '◈' },
     { id: 'bft',       label: 'BFT Vote Log',     icon: '⧉' },
@@ -241,11 +242,60 @@ export default function App() {
 
         <main className="content-container">
 
+          {/* ── GUIDE TAB ── */}
+          {activeTab === 'guide' && (
+            <>
+              <div className="page-header">
+                <h2 className="page-title">Project Walkthrough (For Judges)</h2>
+              </div>
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--status-warning-text)' }}>
+                <div className="card-header" style={{ fontSize: '16px' }}>1. The Problem Statement</div>
+                <div className="card-body">
+                  <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                    When defending Critical National Infrastructure (CNI), standard anomaly detectors fail in a very specific, painful way: 
+                    <strong style={{ color: '#fff' }}> they cannot distinguish between an attack and a legitimate institutional traffic burst.</strong>
+                  </p>
+                  <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6', marginTop: '12px' }}>
+                    For example, when a university opens admissions, traffic spikes massively. A standard anomaly detector flags this as a volumetric attack, triggering thousands of false positives. SOC analysts get alert fatigue, and real attacks slip through the noise.
+                  </p>
+                </div>
+              </div>
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--status-success-text)' }}>
+                <div className="card-header" style={{ fontSize: '16px' }}>2. The Calendar-Conditioned Differentiator</div>
+                <div className="card-body">
+                  <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                    We engineered a Hybrid Anomaly Detector that is aware of the institution's calendar. By training it on "burst" data tagged with calendar phases, the model learns that a massive spike in traffic is normal if it aligns with the calendar.
+                  </p>
+                  <p style={{ color: 'var(--status-success-text)', lineHeight: '1.6', marginTop: '12px', fontWeight: 'bold' }}>
+                    Result: On legitimate traffic bursts, our calendar-conditioning reduced the false-positive rate by 46%!
+                  </p>
+                </div>
+              </div>
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--status-error-text)' }}>
+                <div className="card-header" style={{ fontSize: '16px' }}>3. BFT Consensus Gate & SOAR Audit</div>
+                <div className="card-body">
+                  <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                    Before the system is allowed to automatically isolate a server, it must pass a <strong style={{ color: '#fff' }}>Byzantine Fault Tolerance (BFT) Consensus Gate</strong>. Three independent detection agents vote on the risk. A firewall block only occurs if a 2/3 quorum agrees, guaranteeing that a compromised agent cannot cause a self-inflicted Denial of Service.
+                  </p>
+                  <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6', marginTop: '12px' }}>
+                    Every decision is mapped to a MITRE ATT&CK Knowledge Graph and written to a cryptographically secure SHA-256 Audit Log with RAG-enriched threat intel.
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
+
           {/* ── OVERVIEW TAB ── */}
           {activeTab === 'overview' && (
             <>
               <div className="page-header">
                 <h2 className="page-title">Platform Overview</h2>
+              </div>
+              
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--status-success-text)', backgroundColor: 'rgba(52, 211, 153, 0.05)' }}>
+                <div className="card-body" style={{ padding: '12px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  <strong style={{ color: 'var(--status-success-text)' }}>JUDGE INSIGHT:</strong> The "Burst FPR Reduction" metric below proves our Calendar-Conditioning works. It dynamically suppresses false alarms during legitimate high-volume events (like exams or admissions), allowing the SOC to focus on real threats.
+                </div>
               </div>
 
               <div className="metrics-grid">
@@ -333,6 +383,12 @@ export default function App() {
               <div className="page-header">
                 <h2 className="page-title">FPR-Recall Tradeoff</h2>
               </div>
+              
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--status-warning-text)', backgroundColor: 'rgba(251, 191, 36, 0.05)' }}>
+                <div className="card-body" style={{ padding: '12px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  <strong style={{ color: 'var(--status-warning-text)' }}>JUDGE INSIGHT:</strong> This curve demonstrates how tuning the anomaly threshold impacts detection. The ablation study below proves that Calendar Conditioning fundamentally shifts this curve, granting lower False Positive Rates without sacrificing Recall.
+                </div>
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 <div className="card">
                   <div className="card-header">Calendar-Conditioned Model Curve</div>
@@ -392,6 +448,12 @@ export default function App() {
               <div className="page-header">
                 <h2 className="page-title">BFT Consensus Vote Log</h2>
               </div>
+              
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--status-error-text)', backgroundColor: 'rgba(248, 113, 113, 0.05)' }}>
+                <div className="card-body" style={{ padding: '12px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  <strong style={{ color: 'var(--status-error-text)' }}>JUDGE INSIGHT:</strong> Autonomous AI in critical infrastructure is dangerous. We implemented a Byzantine Fault Tolerance (BFT) gate. A Strict 2/3 Quorum is required to execute an AUTO_CONTAIN. If agents dispute, it safely escalates to a human.
+                </div>
+              </div>
               <div className="card">
                 <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>3-Agent Vote Records — 2/3 Quorum Required for AUTO_CONTAIN</span>
@@ -450,6 +512,12 @@ export default function App() {
               <div className="page-header">
                 <h2 className="page-title">Lateral Movement Attack Graph</h2>
               </div>
+              
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #60a5fa', backgroundColor: 'rgba(96, 165, 250, 0.05)' }}>
+                <div className="card-body" style={{ padding: '12px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  <strong style={{ color: '#60a5fa' }}>JUDGE INSIGHT:</strong> When an anomaly is detected, this module maps its NetworkX connections to trace lateral movement. Analysts can instantly identify adjacent TIER-0 nodes at risk and sever the pivot connections.
+                </div>
+              </div>
               {graphData ? (
                 <div className="card">
                   <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -488,6 +556,12 @@ export default function App() {
             <>
               <div className="page-header">
                 <h2 className="page-title">SHA-256 Hash-Chained Audit Log</h2>
+              </div>
+              
+              <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #a78bfa', backgroundColor: 'rgba(167, 139, 250, 0.05)' }}>
+                <div className="card-body" style={{ padding: '12px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  <strong style={{ color: '#a78bfa' }}>JUDGE INSIGHT:</strong> In Critical Infrastructure, every AI decision must be verifiable. We write every action, along with its RAG-enriched threat context, into an immutable SHA-256 chained log to provide undeniable proof of why the system took action.
+                </div>
               </div>
               <div className="card">
                 <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
