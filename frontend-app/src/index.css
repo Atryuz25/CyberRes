@@ -59,6 +59,15 @@ body.light-theme {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+input, button, select, textarea {
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: inherit;
+  border-radius: 0;
 }
 
 body {
