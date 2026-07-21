@@ -125,6 +125,8 @@ body {
   transition: background-color 0.15s, color 0.15s;
   font-size: 14px;
   font-family: var(--font-sans);
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .nav-item:hover {
@@ -290,6 +292,8 @@ tr:last-child td {
   cursor: pointer;
   transition: all 0.2s;
   border: 1px solid transparent;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .btn-primary {
